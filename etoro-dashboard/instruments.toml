@@ -1,0 +1,994 @@
+# ── EtoroDesk multi-instrument config ────────────────────────────────────────
+# One bot per (asset x strategy).  Rebuild after changes: docker compose up --build -d
+# auto_trade defaults to TRUE — disable individual bots from the Bots tab if needed.
+# Each bot holds its OWN position independently (the one-position-per-asset limit
+# was removed), so you can run many strategies on the same asset at once.
+#
+# EXITS are configured per-strategy in exit_profiles.py (trailing for trend bots,
+# hard take-profit for mean-reverting bots).  To override a single bot, add
+# `trailing_stop_pct = ...` and/or `take_profit_pct = ...` to its section.
+#
+# DIVERSIFICATION NOTE: every bot below trades XRP or BTC — both crypto, highly
+# correlated (~0.7-0.9).  The risk manager's cluster caps stop the fleet piling
+# into one correlated bet, but TRUE diversification needs UNCORRELATED assets.
+# To add one, copy a block and change `label`/`strategy` (leave instrument_id=0
+# to auto-resolve from eToro).  Examples of lower-correlation additions:
+#   label = "Gold  (GOLD)"      # commodity — different driver than crypto
+#   label = "Apple  (AAPL)"     # equity — different regime/hours
+#   label = "EUR/USD  (EURUSD)" # FX major — low crypto correlation
+# Each new asset becomes its own correlated cluster in the risk manager, so the
+# cluster caps then genuinely spread risk instead of re-counting crypto.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── XRP  (XRP) ─────────────────────────────────────────────────────────
+
+[instruments.xrp_llm]
+label              = "XRP  (XRP)"
+instrument_id      = 0
+interval           = "15 Minutes"
+interval_secs      = 900
+candle_count       = 200
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = true
+strategy           = "llm"
+
+[instruments.xrp_llm_1m]
+label              = "XRP  (XRP)"
+instrument_id      = 0
+interval           = "1 Minute"
+interval_secs      = 60
+candle_count       = 300
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = true
+strategy           = "llm"
+
+[instruments.xrp_supertrend]
+label              = "XRP  (XRP)"
+instrument_id      = 0
+interval           = "15 Minutes"
+interval_secs      = 900
+candle_count       = 200
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = true
+strategy           = "supertrend"
+
+[instruments.xrp_ma_crossover]
+label              = "XRP  (XRP)"
+instrument_id      = 0
+interval           = "15 Minutes"
+interval_secs      = 900
+candle_count       = 200
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = true
+strategy           = "ma_crossover"
+
+[instruments.xrp_macd]
+label              = "XRP  (XRP)"
+instrument_id      = 0
+interval           = "15 Minutes"
+interval_secs      = 900
+candle_count       = 200
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = true
+strategy           = "macd"
+
+[instruments.xrp_adx]
+label              = "XRP  (XRP)"
+instrument_id      = 0
+interval           = "15 Minutes"
+interval_secs      = 900
+candle_count       = 200
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = true
+strategy           = "adx"
+
+[instruments.xrp_ichimoku]
+label              = "XRP  (XRP)"
+instrument_id      = 0
+interval           = "15 Minutes"
+interval_secs      = 900
+candle_count       = 200
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = true
+strategy           = "ichimoku"
+
+[instruments.xrp_orb]
+label              = "XRP  (XRP)"
+instrument_id      = 0
+interval           = "15 Minutes"
+interval_secs      = 900
+candle_count       = 200
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = true
+strategy           = "orb"
+
+[instruments.xrp_donchian]
+label              = "XRP  (XRP)"
+instrument_id      = 0
+interval           = "15 Minutes"
+interval_secs      = 900
+candle_count       = 200
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = true
+strategy           = "donchian"
+
+[instruments.xrp_rsi]
+label              = "XRP  (XRP)"
+instrument_id      = 0
+interval           = "1 Minute"
+interval_secs      = 60
+candle_count       = 300
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = true
+strategy           = "rsi"
+
+[instruments.xrp_stoch_rsi]
+label              = "XRP  (XRP)"
+instrument_id      = 0
+interval           = "1 Minute"
+interval_secs      = 60
+candle_count       = 300
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = true
+strategy           = "stoch_rsi"
+
+[instruments.xrp_bollinger_squeeze]
+label              = "XRP  (XRP)"
+instrument_id      = 0
+interval           = "1 Minute"
+interval_secs      = 60
+candle_count       = 300
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = true
+strategy           = "bollinger_squeeze"
+
+[instruments.xrp_mean_reversion]
+label              = "XRP  (XRP)"
+instrument_id      = 0
+interval           = "1 Minute"
+interval_secs      = 60
+candle_count       = 300
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = true
+strategy           = "mean_reversion"
+
+[instruments.xrp_stat_arb]
+label              = "XRP  (XRP)"
+instrument_id      = 0
+interval           = "1 Minute"
+interval_secs      = 60
+candle_count       = 300
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = true
+strategy           = "stat_arb"
+
+[instruments.xrp_rate_arb]
+label              = "XRP  (XRP)"
+instrument_id      = 0
+interval           = "1 Minute"
+interval_secs      = 60
+candle_count       = 300
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = true
+strategy           = "rate_arb"
+
+[instruments.xrp_candlestick]
+label              = "XRP  (XRP)"
+instrument_id      = 0
+interval           = "1 Minute"
+interval_secs      = 60
+candle_count       = 300
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = true
+strategy           = "candlestick"
+
+[instruments.xrp_candlestick_4h]
+label              = "XRP  (XRP)"
+instrument_id      = 0
+interval           = "4 Hours"
+interval_secs      = 14400
+candle_count       = 200
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = true
+strategy           = "candlestick"
+
+[instruments.xrp_candlestick_1d]
+label              = "XRP  (XRP)"
+instrument_id      = 0
+interval           = "1 Day"
+interval_secs      = 86400
+candle_count       = 200
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = true
+strategy           = "candlestick"
+
+[instruments.xrp_candlestick_10m]
+label              = "XRP  (XRP)"
+instrument_id      = 0
+interval           = "10 Minutes"
+interval_secs      = 600
+candle_count       = 200
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = true
+strategy           = "candlestick"
+
+[instruments.xrp_candlestick_15m]
+label              = "XRP  (XRP)"
+instrument_id      = 0
+interval           = "15 Minutes"
+interval_secs      = 900
+candle_count       = 200
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = true
+strategy           = "candlestick"
+
+[instruments.xrp_candlestick_30m]
+label              = "XRP  (XRP)"
+instrument_id      = 0
+interval           = "30 Minutes"
+interval_secs      = 1800
+candle_count       = 200
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = true
+strategy           = "candlestick"
+
+[instruments.xrp_candlestick_1h]
+label              = "XRP  (XRP)"
+instrument_id      = 0
+interval           = "1 Hour"
+interval_secs      = 3600
+candle_count       = 200
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = true
+strategy           = "candlestick"
+
+[instruments.xrp_supertrend_1h]
+label              = "XRP  (XRP)"
+instrument_id      = 0
+interval           = "1 Hour"
+interval_secs      = 3600
+candle_count       = 200
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = true
+strategy           = "supertrend"
+# ── Bitcoin  (BTC) ─────────────────────────────────────────────────────────
+
+[instruments.btc_llm]
+label              = "Bitcoin  (BTC)"
+instrument_id      = 0
+interval           = "15 Minutes"
+interval_secs      = 900
+candle_count       = 200
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = true
+strategy           = "llm"
+
+[instruments.btc_llm_1m]
+label              = "Bitcoin  (BTC)"
+instrument_id      = 0
+interval           = "1 Minute"
+interval_secs      = 60
+candle_count       = 300
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = true
+strategy           = "llm"
+
+[instruments.btc_supertrend]
+label              = "Bitcoin  (BTC)"
+instrument_id      = 0
+interval           = "15 Minutes"
+interval_secs      = 900
+candle_count       = 200
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = true
+strategy           = "supertrend"
+
+[instruments.btc_ma_crossover]
+label              = "Bitcoin  (BTC)"
+instrument_id      = 0
+interval           = "15 Minutes"
+interval_secs      = 900
+candle_count       = 200
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = true
+strategy           = "ma_crossover"
+
+[instruments.btc_macd]
+label              = "Bitcoin  (BTC)"
+instrument_id      = 0
+interval           = "15 Minutes"
+interval_secs      = 900
+candle_count       = 200
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = true
+strategy           = "macd"
+
+[instruments.btc_adx]
+label              = "Bitcoin  (BTC)"
+instrument_id      = 0
+interval           = "15 Minutes"
+interval_secs      = 900
+candle_count       = 200
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = true
+strategy           = "adx"
+
+[instruments.btc_ichimoku]
+label              = "Bitcoin  (BTC)"
+instrument_id      = 0
+interval           = "15 Minutes"
+interval_secs      = 900
+candle_count       = 200
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = true
+strategy           = "ichimoku"
+
+[instruments.btc_orb]
+label              = "Bitcoin  (BTC)"
+instrument_id      = 0
+interval           = "15 Minutes"
+interval_secs      = 900
+candle_count       = 200
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = true
+strategy           = "orb"
+
+[instruments.btc_donchian]
+label              = "Bitcoin  (BTC)"
+instrument_id      = 0
+interval           = "15 Minutes"
+interval_secs      = 900
+candle_count       = 200
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = true
+strategy           = "donchian"
+
+[instruments.btc_rsi]
+label              = "Bitcoin  (BTC)"
+instrument_id      = 0
+interval           = "1 Minute"
+interval_secs      = 60
+candle_count       = 300
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = true
+strategy           = "rsi"
+
+[instruments.btc_stoch_rsi]
+label              = "Bitcoin  (BTC)"
+instrument_id      = 0
+interval           = "1 Minute"
+interval_secs      = 60
+candle_count       = 300
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = true
+strategy           = "stoch_rsi"
+
+[instruments.btc_bollinger_squeeze]
+label              = "Bitcoin  (BTC)"
+instrument_id      = 0
+interval           = "1 Minute"
+interval_secs      = 60
+candle_count       = 300
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = true
+strategy           = "bollinger_squeeze"
+
+[instruments.btc_mean_reversion]
+label              = "Bitcoin  (BTC)"
+instrument_id      = 0
+interval           = "1 Minute"
+interval_secs      = 60
+candle_count       = 300
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = true
+strategy           = "mean_reversion"
+
+[instruments.btc_stat_arb]
+label              = "Bitcoin  (BTC)"
+instrument_id      = 0
+interval           = "1 Minute"
+interval_secs      = 60
+candle_count       = 300
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = true
+strategy           = "stat_arb"
+
+[instruments.btc_rate_arb]
+label              = "Bitcoin  (BTC)"
+instrument_id      = 0
+interval           = "1 Minute"
+interval_secs      = 60
+candle_count       = 300
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = true
+strategy           = "rate_arb"
+
+[instruments.btc_candlestick]
+label              = "Bitcoin  (BTC)"
+instrument_id      = 0
+interval           = "1 Minute"
+interval_secs      = 60
+candle_count       = 300
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = true
+strategy           = "candlestick"
+
+[instruments.btc_candlestick_4h]
+label              = "Bitcoin  (BTC)"
+instrument_id      = 0
+interval           = "4 Hours"
+interval_secs      = 14400
+candle_count       = 200
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = true
+strategy           = "candlestick"
+
+[instruments.btc_candlestick_1d]
+label              = "Bitcoin  (BTC)"
+instrument_id      = 0
+interval           = "1 Day"
+interval_secs      = 86400
+candle_count       = 200
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = true
+strategy           = "candlestick"
+
+[instruments.btc_candlestick_10m]
+label              = "Bitcoin  (BTC)"
+instrument_id      = 0
+interval           = "10 Minutes"
+interval_secs      = 600
+candle_count       = 200
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = true
+strategy           = "candlestick"
+
+[instruments.btc_candlestick_15m]
+label              = "Bitcoin  (BTC)"
+instrument_id      = 0
+interval           = "15 Minutes"
+interval_secs      = 900
+candle_count       = 200
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = true
+strategy           = "candlestick"
+
+[instruments.btc_candlestick_30m]
+label              = "Bitcoin  (BTC)"
+instrument_id      = 0
+interval           = "30 Minutes"
+interval_secs      = 1800
+candle_count       = 200
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = true
+strategy           = "candlestick"
+
+[instruments.btc_candlestick_1h]
+label              = "Bitcoin  (BTC)"
+instrument_id      = 0
+interval           = "1 Hour"
+interval_secs      = 3600
+candle_count       = 200
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = true
+strategy           = "candlestick"
+
+[instruments.btc_supertrend_1h]
+label              = "Bitcoin  (BTC)"
+instrument_id      = 0
+interval           = "1 Hour"
+interval_secs      = 3600
+candle_count       = 200
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = true
+strategy           = "supertrend"
+
+# ── Intraday diversity fleet — 10 bots, mixed strategies & intervals ─────────
+# Spreads across 10m / 15m / 30m / 1h (intraday filter).
+
+[instruments.xrp_macd_10m]
+label              = "XRP  (XRP)"
+instrument_id      = 0
+interval           = "10 Minutes"
+interval_secs      = 600
+candle_count       = 200
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = true
+strategy           = "macd"
+
+[instruments.btc_stoch_rsi_10m]
+label              = "Bitcoin  (BTC)"
+instrument_id      = 0
+interval           = "10 Minutes"
+interval_secs      = 600
+candle_count       = 200
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = true
+strategy           = "stoch_rsi"
+
+[instruments.xrp_stat_arb_15m]
+label              = "XRP  (XRP)"
+instrument_id      = 0
+interval           = "15 Minutes"
+interval_secs      = 900
+candle_count       = 200
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = true
+strategy           = "stat_arb"
+
+[instruments.btc_rate_arb_15m]
+label              = "Bitcoin  (BTC)"
+instrument_id      = 0
+interval           = "15 Minutes"
+interval_secs      = 900
+candle_count       = 200
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = true
+strategy           = "rate_arb"
+
+[instruments.xrp_bollinger_squeeze_30m]
+label              = "XRP  (XRP)"
+instrument_id      = 0
+interval           = "30 Minutes"
+interval_secs      = 1800
+candle_count       = 200
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = true
+strategy           = "bollinger_squeeze"
+
+[instruments.btc_ichimoku_30m]
+label              = "Bitcoin  (BTC)"
+instrument_id      = 0
+interval           = "30 Minutes"
+interval_secs      = 1800
+candle_count       = 200
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = true
+strategy           = "ichimoku"
+
+[instruments.xrp_mean_reversion_30m]
+label              = "XRP  (XRP)"
+instrument_id      = 0
+interval           = "30 Minutes"
+interval_secs      = 1800
+candle_count       = 200
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = true
+strategy           = "mean_reversion"
+
+[instruments.btc_rsi_30m]
+label              = "Bitcoin  (BTC)"
+instrument_id      = 0
+interval           = "30 Minutes"
+interval_secs      = 1800
+candle_count       = 200
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = true
+strategy           = "rsi"
+
+[instruments.xrp_donchian_1h]
+label              = "XRP  (XRP)"
+instrument_id      = 0
+interval           = "1 Hour"
+interval_secs      = 3600
+candle_count       = 200
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = true
+strategy           = "donchian"
+
+[instruments.btc_ma_crossover_1h]
+label              = "Bitcoin  (BTC)"
+instrument_id      = 0
+interval           = "1 Hour"
+interval_secs      = 3600
+candle_count       = 200
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = true
+strategy           = "ma_crossover"
+
+# ── Master portfolio risk manager (risk_manager.py) ──────────────────────────
+# Default-ON with conservative caps.  These bite only when the FLEET concentrates
+# risk; a small book trades exactly as before.  The gate can SHRINK a trade to fit
+# headroom or BLOCK it; it never blocks an exit, and fails open on error.  Tune
+# freely — values hot-reload on the next tick (no restart needed).
+[risk]
+enabled                    = true
+max_concurrent_positions   = 12     # of all bots, how many may be live at once
+max_gross_exposure_pct     = 60.0   # Σ open position $ ≤ this % of equity
+max_portfolio_heat_pct     = 6.0    # Σ risk-to-stop $ across all positions ≤ % equity
+max_cluster_gross_pct      = 45.0   # Σ position $ within one correlated cluster (e.g. crypto)
+max_cluster_net_pct        = 25.0   # |long$ − short$| within a cluster ≤ % equity
+max_same_dir_per_cluster   = 6      # max same-direction positions per cluster (anti-stacking)
+max_positions_per_asset    = 4      # how many bots may hold the same asset at once
+block_internal_hedge       = false  # don't open opposite a larger same-asset net position
+daily_drawdown_halt_pct    = 5.0    # halt NEW entries if today's realised P&L ≤ −% of equity
+
+# ── Tesla Motors, Inc.  (TSLA) ─ STOCK: trades only while the US market is open (engine gates orders/signals via eToro market-hours detection) ─
+
+[instruments.tsla_llm]
+label              = "Tesla Motors, Inc.  (TSLA)"
+instrument_id      = 1111
+interval           = "15 Minutes"
+interval_secs      = 900
+candle_count       = 200
+demo_amount        = 5000.0
+enabled            = true
+auto_trade         = false
+strategy           = "llm"
+
+[instruments.tsla_supertrend]
+label              = "Tesla Motors, Inc.  (TSLA)"
+instrument_id      = 1111
+interval           = "15 Minutes"
+interval_secs      = 900
+candle_count       = 200
+demo_amount        = 5000.0
+enabled            = true
+auto_trade         = false
+strategy           = "supertrend"
+
+[instruments.tsla_ma_crossover]
+label              = "Tesla Motors, Inc.  (TSLA)"
+instrument_id      = 1111
+interval           = "15 Minutes"
+interval_secs      = 900
+candle_count       = 200
+demo_amount        = 5000.0
+enabled            = true
+auto_trade         = false
+strategy           = "ma_crossover"
+
+[instruments.tsla_macd]
+label              = "Tesla Motors, Inc.  (TSLA)"
+instrument_id      = 1111
+interval           = "15 Minutes"
+interval_secs      = 900
+candle_count       = 200
+demo_amount        = 5000.0
+enabled            = true
+auto_trade         = false
+strategy           = "macd"
+
+[instruments.tsla_adx]
+label              = "Tesla Motors, Inc.  (TSLA)"
+instrument_id      = 1111
+interval           = "15 Minutes"
+interval_secs      = 900
+candle_count       = 200
+demo_amount        = 5000.0
+enabled            = true
+auto_trade         = false
+strategy           = "adx"
+
+[instruments.tsla_ichimoku]
+label              = "Tesla Motors, Inc.  (TSLA)"
+instrument_id      = 1111
+interval           = "15 Minutes"
+interval_secs      = 900
+candle_count       = 200
+demo_amount        = 5000.0
+enabled            = true
+auto_trade         = false
+strategy           = "ichimoku"
+
+[instruments.tsla_orb]
+label              = "Tesla Motors, Inc.  (TSLA)"
+instrument_id      = 1111
+interval           = "15 Minutes"
+interval_secs      = 900
+candle_count       = 200
+demo_amount        = 5000.0
+enabled            = true
+auto_trade         = false
+strategy           = "orb"
+
+[instruments.tsla_donchian]
+label              = "Tesla Motors, Inc.  (TSLA)"
+instrument_id      = 1111
+interval           = "15 Minutes"
+interval_secs      = 900
+candle_count       = 200
+demo_amount        = 5000.0
+enabled            = true
+auto_trade         = false
+strategy           = "donchian"
+
+[instruments.tsla_rsi]
+label              = "Tesla Motors, Inc.  (TSLA)"
+instrument_id      = 1111
+interval           = "1 Minute"
+interval_secs      = 60
+candle_count       = 300
+demo_amount        = 5000.0
+enabled            = true
+auto_trade         = false
+strategy           = "rsi"
+
+[instruments.tsla_stoch_rsi]
+label              = "Tesla Motors, Inc.  (TSLA)"
+instrument_id      = 1111
+interval           = "1 Minute"
+interval_secs      = 60
+candle_count       = 300
+demo_amount        = 5000.0
+enabled            = true
+auto_trade         = false
+strategy           = "stoch_rsi"
+
+[instruments.tsla_bollinger_squeeze]
+label              = "Tesla Motors, Inc.  (TSLA)"
+instrument_id      = 1111
+interval           = "1 Minute"
+interval_secs      = 60
+candle_count       = 300
+demo_amount        = 5000.0
+enabled            = true
+auto_trade         = false
+strategy           = "bollinger_squeeze"
+
+[instruments.tsla_mean_reversion]
+label              = "Tesla Motors, Inc.  (TSLA)"
+instrument_id      = 1111
+interval           = "1 Minute"
+interval_secs      = 60
+candle_count       = 300
+demo_amount        = 5000.0
+enabled            = true
+auto_trade         = false
+strategy           = "mean_reversion"
+
+[instruments.tsla_stat_arb]
+label              = "Tesla Motors, Inc.  (TSLA)"
+instrument_id      = 1111
+interval           = "1 Minute"
+interval_secs      = 60
+candle_count       = 300
+demo_amount        = 5000.0
+enabled            = true
+auto_trade         = false
+strategy           = "stat_arb"
+
+[instruments.tsla_rate_arb]
+label              = "Tesla Motors, Inc.  (TSLA)"
+instrument_id      = 1111
+interval           = "1 Minute"
+interval_secs      = 60
+candle_count       = 300
+demo_amount        = 5000.0
+enabled            = true
+auto_trade         = false
+strategy           = "rate_arb"
+
+[instruments.tsla_candlestick]
+label              = "Tesla Motors, Inc.  (TSLA)"
+instrument_id      = 1111
+interval           = "1 Minute"
+interval_secs      = 60
+candle_count       = 300
+demo_amount        = 5000.0
+enabled            = true
+auto_trade         = false
+strategy           = "candlestick"
+
+# ── NVIDIA Corporation  (NVDA) ─ STOCK: trades only while the US market is open (engine gates orders/signals via eToro market-hours detection) ─
+
+[instruments.nvda_llm]
+label              = "NVIDIA Corporation  (NVDA)"
+instrument_id      = 1137
+interval           = "15 Minutes"
+interval_secs      = 900
+candle_count       = 200
+demo_amount        = 5000.0
+enabled            = true
+auto_trade         = false
+strategy           = "llm"
+
+[instruments.nvda_supertrend]
+label              = "NVIDIA Corporation  (NVDA)"
+instrument_id      = 1137
+interval           = "15 Minutes"
+interval_secs      = 900
+candle_count       = 200
+demo_amount        = 5000.0
+enabled            = true
+auto_trade         = false
+strategy           = "supertrend"
+
+[instruments.nvda_ma_crossover]
+label              = "NVIDIA Corporation  (NVDA)"
+instrument_id      = 1137
+interval           = "15 Minutes"
+interval_secs      = 900
+candle_count       = 200
+demo_amount        = 5000.0
+enabled            = true
+auto_trade         = false
+strategy           = "ma_crossover"
+
+[instruments.nvda_macd]
+label              = "NVIDIA Corporation  (NVDA)"
+instrument_id      = 1137
+interval           = "15 Minutes"
+interval_secs      = 900
+candle_count       = 200
+demo_amount        = 5000.0
+enabled            = true
+auto_trade         = false
+strategy           = "macd"
+
+[instruments.nvda_adx]
+label              = "NVIDIA Corporation  (NVDA)"
+instrument_id      = 1137
+interval           = "15 Minutes"
+interval_secs      = 900
+candle_count       = 200
+demo_amount        = 5000.0
+enabled            = true
+auto_trade         = false
+strategy           = "adx"
+
+[instruments.nvda_ichimoku]
+label              = "NVIDIA Corporation  (NVDA)"
+instrument_id      = 1137
+interval           = "15 Minutes"
+interval_secs      = 900
+candle_count       = 200
+demo_amount        = 5000.0
+enabled            = true
+auto_trade         = false
+strategy           = "ichimoku"
+
+[instruments.nvda_orb]
+label              = "NVIDIA Corporation  (NVDA)"
+instrument_id      = 1137
+interval           = "15 Minutes"
+interval_secs      = 900
+candle_count       = 200
+demo_amount        = 5000.0
+enabled            = true
+auto_trade         = false
+strategy           = "orb"
+
+[instruments.nvda_donchian]
+label              = "NVIDIA Corporation  (NVDA)"
+instrument_id      = 1137
+interval           = "15 Minutes"
+interval_secs      = 900
+candle_count       = 200
+demo_amount        = 5000.0
+enabled            = true
+auto_trade         = false
+strategy           = "donchian"
+
+[instruments.nvda_rsi]
+label              = "NVIDIA Corporation  (NVDA)"
+instrument_id      = 1137
+interval           = "1 Minute"
+interval_secs      = 60
+candle_count       = 300
+demo_amount        = 5000.0
+enabled            = true
+auto_trade         = false
+strategy           = "rsi"
+
+[instruments.nvda_stoch_rsi]
+label              = "NVIDIA Corporation  (NVDA)"
+instrument_id      = 1137
+interval           = "1 Minute"
+interval_secs      = 60
+candle_count       = 300
+demo_amount        = 5000.0
+enabled            = true
+auto_trade         = false
+strategy           = "stoch_rsi"
+
+[instruments.nvda_bollinger_squeeze]
+label              = "NVIDIA Corporation  (NVDA)"
+instrument_id      = 1137
+interval           = "1 Minute"
+interval_secs      = 60
+candle_count       = 300
+demo_amount        = 5000.0
+enabled            = true
+auto_trade         = false
+strategy           = "bollinger_squeeze"
+
+[instruments.nvda_mean_reversion]
+label              = "NVIDIA Corporation  (NVDA)"
+instrument_id      = 1137
+interval           = "1 Minute"
+interval_secs      = 60
+candle_count       = 300
+demo_amount        = 5000.0
+enabled            = true
+auto_trade         = false
+strategy           = "mean_reversion"
+
+[instruments.nvda_stat_arb]
+label              = "NVIDIA Corporation  (NVDA)"
+instrument_id      = 1137
+interval           = "1 Minute"
+interval_secs      = 60
+candle_count       = 300
+demo_amount        = 5000.0
+enabled            = true
+auto_trade         = false
+strategy           = "stat_arb"
+
+[instruments.nvda_rate_arb]
+label              = "NVIDIA Corporation  (NVDA)"
+instrument_id      = 1137
+interval           = "1 Minute"
+interval_secs      = 60
+candle_count       = 300
+demo_amount        = 5000.0
+enabled            = true
+auto_trade         = false
+strategy           = "rate_arb"
+
+[instruments.nvda_candlestick]
+label              = "NVIDIA Corporation  (NVDA)"
+instrument_id      = 1137
+interval           = "1 Minute"
+interval_secs      = 60
+candle_count       = 300
+demo_amount        = 5000.0
+enabled            = true
+auto_trade         = false
+strategy           = "candlestick"

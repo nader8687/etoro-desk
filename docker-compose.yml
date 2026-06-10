@@ -1,0 +1,73 @@
+# ── EtoroDesk ─────────────────────────────────────────────────────────────────
+# Start everything:   docker compose up --build -d
+# Stop everything:    docker compose down
+# Rebuild one:        docker compose up --build -d etoro-dashboard
+#
+# Services:
+#   etoro-dashboard  →  http://localhost:8501   (Streamlit trading dashboard)
+#   visual-bot       →  http://localhost:8083   (FastAPI signal engine)
+#                       http://localhost:8083/docs  (API docs)
+# ─────────────────────────────────────────────────────────────────────────────
+
+networks:
+  etoro-net:
+    driver: bridge
+
+volumes:
+  etoro-data:   # persists signal log + runtime state across restarts
+
+services:
+
+  etoro-dashboard:
+    build: ./etoro-dashboard
+    container_name: etoro-dashboard
+    ports:
+      - "8501:8501"
+      - "8502:8502"
+    env_file: .env
+    environment:
+      - VISUAL_BOT_URL=http://visual-bot:8080
+      - DASHBOARD_HEALTH_PORT=8502
+      - SIGNAL_LOG_PATH=/app/data/signal_log.jsonl
+      - ETORO_RUNTIME_STATE=/app/data/etoro_runtime.json
+      # Trade journal (Performance & Lessons tab + LLM memory) — MUST live on the
+      # persistent volume, otherwise it defaults to /tmp and is wiped on every
+      # `docker compose up --build`, leaving the Performance tab empty.
+      - TRADE_JOURNAL_PATH=/app/data/trade_journal.jsonl
+      # Per-bot OFF state + position→bot ownership — persisted so a turned-off bot
+      # stays off and each bot re-adopts its own position across restarts.
+      - DISABLED_BOTS_PATH=/app/data/disabled_bots.json
+      - POSITION_OWNERS_PATH=/app/data/position_owners.json
+      - USER_SETTINGS_PATH=/app/data/user_settings.json
+    volumes:
+      - etoro-data:/app/data
+    networks:
+      - etoro-net
+    restart: unless-stopped
+    depends_on:
+      visual-bot:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:8501/_stcore/health')"]
+      interval: 30s
+      timeout: 10s
+      start_period: 20s
+      retries: 3
+
+  visual-bot:
+    build: ./visual-bot
+    container_name: visual-bot
+    ports:
+      - "8083:8080"
+    env_file: .env
+    networks:
+      - etoro-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
+      interval: 20s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
