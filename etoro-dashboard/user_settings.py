@@ -29,13 +29,18 @@ class ExitKindSettings:
 
 @dataclass
 class RiskSettings:
+    # Defaults tuned for a heavily CRYPTO-CORRELATED fleet (XRP+BTC ≈ 0.8):
+    # same-direction stacking caps are deliberately tight — the 5th+ correlated
+    # position adds ~full risk and ~zero independent edge.  Heat (4%) sits
+    # BELOW the daily halt (5%) so the halt is a true backstop, not a
+    # fires-after-the-crash brake.
     enabled: bool = True
-    max_concurrent_positions: int = 12
+    max_concurrent_positions: int = 14
     max_gross_exposure_pct: float = 60.0
-    max_portfolio_heat_pct: float = 6.0
+    max_portfolio_heat_pct: float = 4.0
     max_cluster_gross_pct: float = 45.0
     max_cluster_net_pct: float = 25.0
-    max_same_dir_per_cluster: int = 6
+    max_same_dir_per_cluster: int = 4
     max_positions_per_asset: int = 4
     block_internal_hedge: bool = False
     daily_drawdown_halt_pct: float = 5.0
@@ -56,7 +61,9 @@ class TradingSettings:
 class LearningSettings:
     entry_guidance_enabled: bool = True
     min_bucket_n: int = 8
-    lose_winrate_max: float = 0.40
+    # 0.60 (was 0.40): the documented failure mode is high-winrate buckets that
+    # lose money — at 0.40 the AND-veto could never catch them.
+    lose_winrate_max: float = 0.60
     lose_profit_factor_max: float = 0.75
 
 
@@ -70,6 +77,25 @@ class BehaviorSettings:
     regime_filter_enabled: bool = True
     recovery_exit_enabled: bool = True
     recovery_hold_mult: float = 2.5   # × strategy avg hold while never green
+    # True (default): at recovery, set a BREAKEVEN STOP (lock no-loss, let
+    # TP/ATR-trail ride a breakout).  False: close immediately at ≥ $0.
+    recovery_breakeven_stop: bool = True
+    # "Meaningfully green" threshold = this × the position's entry spread cost;
+    # also the recovery-zone band for LLM hold decisions.
+    spread_recovery_mult: float = 2.0
+    # LLM CLOSE on a losing position only executes at ≥ this confidence.
+    llm_loss_cut_min_conf: int = 70
+
+
+@dataclass
+class CashFreeingSettings:
+    """Cash-liberation guardrails (reserve relax + weakest-position trims)."""
+    min_edge_to_free: float = 0.50      # signal edge floor before touching the book
+    edge_margin: float = 0.15           # new edge must beat a victim's edge by this
+    trim_cooldown_sec: float = 120.0    # min interval between trims of one position
+    min_position_age_sec: float = 120.0 # never trim a position younger than this
+    max_trim_fraction: float = 0.75     # max share shaved off one position
+    keep_min_usd: float = 200.0         # never leave a position smaller than this
 
 
 @dataclass
@@ -79,6 +105,24 @@ class RankingSettings:
     pf_recover: float = 1.0
     window: int = 40
     review_sec: float = 1800.0
+
+
+@dataclass
+class AtrSettings:
+    """Volatility (ATR) stop configuration — entry stops + chandelier trailing.
+
+    Entry-stop multipliers are per behaviour class, research-informed: trend
+    needs room (2.5–3x ATR), mean-reversion moderate (2x), arb tight (1.5x).
+    The TRAIL multiplier is the golden-rule 2x for every class.  noise_floor
+    is the minimum ATR-driven stop distance; widen_max caps the stop at
+    fixed-floor x widen_max when ATR explodes in a panic (max-loss rule)."""
+    stop_mult_trend: float = 2.5
+    stop_mult_llm: float = 2.5
+    stop_mult_mean_revert: float = 2.0
+    stop_mult_arb: float = 1.5
+    trail_mult: float = 2.0
+    noise_floor_pct: float = 0.10
+    widen_max: float = 3.0
 
 
 def _code_trading_defaults() -> TradingSettings:
@@ -128,6 +172,8 @@ def _defaults() -> dict[str, Any]:
         "display": asdict(DisplaySettings()),
         "behavior": asdict(BehaviorSettings()),
         "ranking": asdict(RankingSettings()),
+        "atr": asdict(AtrSettings()),
+        "cash_freeing": asdict(CashFreeingSettings()),
         "bot_overrides": {},
     }
 
@@ -174,6 +220,8 @@ def load() -> dict[str, Any]:
     _merge_section(base["display"], saved.get("display"), tuple(DisplaySettings().__dataclass_fields__))
     _merge_section(base["behavior"], saved.get("behavior"), tuple(BehaviorSettings().__dataclass_fields__))
     _merge_section(base["ranking"], saved.get("ranking"), tuple(RankingSettings().__dataclass_fields__))
+    _merge_section(base["atr"], saved.get("atr"), tuple(AtrSettings().__dataclass_fields__))
+    _merge_section(base["cash_freeing"], saved.get("cash_freeing"), tuple(CashFreeingSettings().__dataclass_fields__))
     if isinstance(saved.get("bot_overrides"), dict):
         base["bot_overrides"] = {
             str(k): v for k, v in saved["bot_overrides"].items() if isinstance(v, dict)
@@ -193,6 +241,8 @@ def save(
     display: dict | None = None,
     behavior: dict | None = None,
     ranking: dict | None = None,
+    atr: dict | None = None,
+    cash_freeing: dict | None = None,
     bot_overrides: dict | None = None,
 ) -> None:
     """Persist user edits; partial updates merge into the saved file."""
@@ -211,6 +261,10 @@ def save(
         current["behavior"] = behavior
     if ranking is not None:
         current["ranking"] = ranking
+    if atr is not None:
+        current["atr"] = atr
+    if cash_freeing is not None:
+        current["cash_freeing"] = cash_freeing
     if bot_overrides is not None:
         current["bot_overrides"] = bot_overrides
     try:
@@ -293,6 +347,22 @@ def ranking_settings() -> RankingSettings:
     return RankingSettings(**{
         f.name: data.get(f.name, getattr(RankingSettings(), f.name))
         for f in fields(RankingSettings())
+    })
+
+
+def atr_settings() -> AtrSettings:
+    data = load()["atr"]
+    return AtrSettings(**{
+        f.name: data.get(f.name, getattr(AtrSettings(), f.name))
+        for f in fields(AtrSettings())
+    })
+
+
+def cash_freeing_settings() -> CashFreeingSettings:
+    data = load()["cash_freeing"]
+    return CashFreeingSettings(**{
+        f.name: data.get(f.name, getattr(CashFreeingSettings(), f.name))
+        for f in fields(CashFreeingSettings())
     })
 
 

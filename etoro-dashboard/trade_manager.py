@@ -30,11 +30,29 @@ STOP_LOSS_MULT = 2.0
 # Floor stop distance — spread-only stops are far too tight on crypto.
 STOP_LOSS_MIN_PCT = 2.5
 # Loss within this many × entry-spread (in $) is spread recovery — never LLM-close.
+# FALLBACK ONLY — Settings tab (behavior.spread_recovery_mult) is the truth.
 SPREAD_RECOVERY_MULT = 2.0
 # Minimum LLM exit confidence required to CUT a real loss (a loss beyond the
 # spread-recovery zone).  Below this we ride to the mechanical stop-loss; at or
 # above it a confident "the trend has turned" CLOSE is honoured.
+# FALLBACK ONLY — Settings tab (behavior.llm_loss_cut_min_conf) is the truth.
 LLM_LOSS_CUT_MIN_CONF = 70
+
+
+def _spread_recovery_mult() -> float:
+    try:
+        import user_settings
+        return float(user_settings.behavior_settings().spread_recovery_mult)
+    except Exception:
+        return SPREAD_RECOVERY_MULT
+
+
+def _llm_loss_cut_min_conf() -> int:
+    try:
+        import user_settings
+        return int(user_settings.behavior_settings().llm_loss_cut_min_conf)
+    except Exception:
+        return LLM_LOSS_CUT_MIN_CONF
 
 
 def _extract_pid(pos: dict) -> Optional[int]:
@@ -182,6 +200,19 @@ class PaperTrade:
     # Set once the trade has been underwater (never meaningfully green) longer
     # than recovery_hold_mult × the strategy's avg hold — close on next ≥$0 tick.
     recovery_armed: bool = False
+    # Breakeven floor applied: when the recovery exit caught the trade back at
+    # ≥$0, the stop was RAISED TO ENTRY instead of closing — downside locked at
+    # ~no loss while TP and the ATR chandelier trail keep the upside open.
+    breakeven_set: bool = False
+    # ── Chandelier ATR trailing state (golden rule 2xATR) ─────────────────────
+    # peak_price: best favourable price seen since entry (LONG: highest bid;
+    #             SHORT: lowest ask) — the chandelier's anchor.
+    # trail_stop_price: the RATCHETED stop level = peak_price ∓ k·ATR.  Moves
+    #             only in the trade's favour, never widens (the ratchet rule).
+    #             Initialised to the entry 2xATR hard stop, so trail and hard
+    #             stop start as the same line and the trail only tightens.
+    peak_price: float = 0.0
+    trail_stop_price: float = 0.0
 
 
 @dataclass
@@ -206,6 +237,10 @@ class ClosedTrade:
     llm_reasoning: Optional[str] = None
     llm_observations: Optional[str] = None
     shadow: bool = False   # legacy virtual trade — excluded from money stats
+    # ACTUAL dollar P&L (units × per-unit price move).  `profit` above is the
+    # raw PRICE move per unit — on BTC a "−71.2" profit is −71.2 price points,
+    # i.e. only ≈ −$1 on a $1k position.  Display code must use THIS field.
+    pnl_dollars: float = 0.0
 
 
 # ── Trade stores keyed by BOT (UUID) ──────────────────────────────────────────
@@ -966,6 +1001,8 @@ def adopt_etoro_position(
         bot_id=bot_id,
         strategy=strategy or "",   # so the journal attributes adopted trades correctly
         etoro_open_time_synced=real_open is not None,
+        peak_price=float(entry_price),
+        trail_stop_price=float(stop_loss),
     )
     with _lock:
         _open[bot_id] = trade
@@ -1054,8 +1091,20 @@ def update_peak_pnl(
         # refactor.  Match on bot_id and confirm it's still THIS trade so a
         # closing/replaced trade's peak isn't clobbered.
         cur = _open.get(trade.bot_id)
-        if cur is trade and pnl_dollars > cur.peak_pnl:
+        if cur is None or cur is not trade:
+            return
+        if pnl_dollars > cur.peak_pnl:
             cur.peak_pnl = pnl_dollars
+        # Chandelier anchor: best FAVOURABLE price seen since entry — the
+        # exit-side quote (LONG closes at bid, SHORT at ask).
+        if cur.direction == "LONG":
+            fav = float(bid or 0.0)
+            if fav > 0 and fav > (cur.peak_price or cur.entry_price):
+                cur.peak_price = fav
+        else:
+            fav = float(ask or 0.0)
+            if fav > 0 and (cur.peak_price <= 0 or fav < cur.peak_price):
+                cur.peak_price = fav
 
 
 def distance_to_stop(trade: PaperTrade, ask: float, bid: float) -> float:
@@ -1121,10 +1170,10 @@ def build_exit_position_context(
         "peak_pnl":            peak,
         "in_profit":           pnl_dollars > spread_cost,
         "spread_cost":         spread_cost,
-        "spread_recovery_limit": SPREAD_RECOVERY_MULT * spread_cost,
+        "spread_recovery_limit": _spread_recovery_mult() * spread_cost,
         "in_spread_recovery_zone": (
             pnl_dollars <= spread_cost
-            and pnl_dollars > -(SPREAD_RECOVERY_MULT * spread_cost)
+            and pnl_dollars > -(_spread_recovery_mult() * spread_cost)
         ),
     }
 
@@ -1142,7 +1191,7 @@ def llm_close_veto_reason(
     )
     _, units = _amount_and_units(trade.entry_price, trade=trade)
     spread_cost = units * trade.entry_spread if units else 0.0
-    recovery_limit = SPREAD_RECOVERY_MULT * spread_cost
+    recovery_limit = _spread_recovery_mult() * spread_cost
 
     if pnl_dollars > spread_cost:
         return ""
@@ -1154,10 +1203,11 @@ def llm_close_veto_reason(
         )
 
     conf = int(exit_result.get("confidence", 0)) if exit_result else 0
-    if conf >= LLM_LOSS_CUT_MIN_CONF:
+    min_conf = _llm_loss_cut_min_conf()
+    if conf >= min_conf:
         return ""
     return (
-        f"LLM loss-cut needs ≥{LLM_LOSS_CUT_MIN_CONF}% confidence "
+        f"LLM loss-cut needs ≥{min_conf}% confidence "
         f"(signal {conf}%)"
     )
 
@@ -1207,9 +1257,12 @@ def should_stop_loss(trade: PaperTrade, ask: float, bid: float) -> bool:
 def trailing_stop_trigger_price(trade: PaperTrade, trail_pct: float) -> float:
     """Return the price level at which the trailing stop fires.
 
-    Computed from the recorded peak P&L so no extra field is needed.
-    Returns 0.0 when there is no meaningful peak to trail from.
+    Prefers the live CHANDELIER level (trail_stop_price — ratcheted 2xATR from
+    peak) when the trade carries one; falls back to the legacy %-from-peak
+    reconstruction otherwise.  Returns 0.0 when there is nothing to trail from.
     """
+    if getattr(trade, "trail_stop_price", 0.0) > 0:
+        return float(trade.trail_stop_price)
     if trail_pct <= 0 or trade.peak_pnl <= 0 or not trade.entry_price:
         return 0.0
     units = trade.trade_amount / trade.entry_price if trade.trade_amount else 0.0
@@ -1268,32 +1321,70 @@ def check_trailing_stop(
     bid: float,
     trail_pct: float,
     client: Optional["EToroClient"] = None,
+    *,
+    atr_pct: Optional[float] = None,
+    atr_mult: float = 0.0,
 ) -> Optional["ClosedTrade"]:
-    """Close THIS bot's trade if price has retreated trail_pct % from its peak.
+    """Close THIS bot's trade when price retreats to the trailing stop.
 
-    Only activates once the position is in genuine profit (peak_pnl > 0).
-    Safe to call every tick — returns None when not triggered.
+    TWO MODES, checked every tick:
+
+    • CHANDELIER ATR (preferred — golden rule 2xATR; active when atr_mult>0 and
+      a live atr_pct is supplied):
+          LONG : level = max(level_prev, peak_price − k·ATR)
+          SHORT: level = min(level_prev, peak_price + k·ATR)
+      The level RATCHETS — it moves only in the trade's favour, never widens —
+      and it is armed FROM ENTRY (level starts at the entry 2xATR hard stop),
+      so it is the live stop, not just a profit lock.  k·ATR is recomputed each
+      candle from current volatility, so the buffer breathes with the market.
+
+    • LEGACY %-FROM-PEAK (fallback when no ATR is available): fires when price
+      pulls back trail_pct% from the peak, armed only once in profit
+      (peak_pnl > 0) — the original behaviour, unchanged.
     """
-    if trail_pct <= 0:
+    use_atr = bool(atr_mult and atr_mult > 0 and atr_pct and atr_pct > 0)
+    if not use_atr and trail_pct <= 0:
         return None
     with _lock:
         trade = _open.get(bot_id)
-        if not trade or trade.peak_pnl <= 0:
+        if not trade:
             return None
-        stop = trailing_stop_trigger_price(trade, trail_pct)
-        if not stop:
-            return None
-        triggered = (
-            (trade.direction == "LONG"  and bid <= stop)
-            or (trade.direction == "SHORT" and ask >= stop)
-        )
+        if use_atr:
+            anchor = trade.peak_price or trade.entry_price
+            atr_price = (float(atr_pct) / 100.0) * anchor
+            if trade.direction == "LONG":
+                candidate = anchor - atr_mult * atr_price
+                level = max(trade.trail_stop_price or 0.0, candidate)
+                trade.trail_stop_price = level
+                triggered = bid > 0 and bid <= level
+            else:
+                candidate = anchor + atr_mult * atr_price
+                prev = trade.trail_stop_price
+                level = candidate if prev <= 0 else min(prev, candidate)
+                trade.trail_stop_price = level
+                triggered = ask > 0 and ask >= level
+            reason_txt = (
+                f"Chandelier ATR trail hit: {atr_mult:.1f}x ATR({atr_pct:.3f}%) "
+                f"from peak {anchor:.5f} -> level {level:.5f}"
+            )
+        else:
+            if trade.peak_pnl <= 0:
+                return None
+            stop = trailing_stop_trigger_price(trade, trail_pct)
+            if not stop:
+                return None
+            triggered = (
+                (trade.direction == "LONG"  and bid <= stop)
+                or (trade.direction == "SHORT" and ask >= stop)
+            )
+            reason_txt = f"Trailing stop triggered: price pulled back >{trail_pct}% from peak"
         if not triggered:
             return None
         del _open[bot_id]
         _closing[bot_id] = trade
     return _finalize_close(
         trade, ask, bid, "trailing_stop", client,
-        llm_reasoning=f"Trailing stop triggered: price pulled back >{trail_pct}% from peak",
+        llm_reasoning=reason_txt,
     )
 
 
@@ -1306,13 +1397,22 @@ def check_recovery_exit(
     *,
     enabled: bool = True,
     hold_mult: float = 2.5,
+    breakeven_stop: bool = True,
 ) -> Optional["ClosedTrade"]:
-    """Close when a long-underwater trade recovers to ≥ $0 after overstaying.
+    """Long-underwater trade recovers to ≥ $0 after overstaying — act on it.
 
-    Arms once the position has never been meaningfully green (peak P&L within the
-    spread-recovery zone) for at least ``hold_mult`` × the strategy's average
-    hold time.  On the first tick with dollar P&L ≥ 0, bank the breakeven exit
-    instead of riding back into loss.
+    Arms once the position has never been meaningfully green (peak P&L within
+    the spread-recovery zone) for at least ``hold_mult`` × the strategy's
+    average hold time.  On the first tick with dollar P&L ≥ 0:
+
+    • breakeven_stop=True (default): DON'T close — raise the stop to the entry
+      price (a breakeven floor; never widens the existing stop) and let the
+      take-profit / ATR chandelier trail keep the upside open.  If price breaks
+      out, the winners run; if it rolls back over, check_stop_loss closes at
+      ~no loss with reason "breakeven_stop".
+
+    • breakeven_stop=False: legacy behaviour — close immediately at ≥ $0
+      (reason "recovery_exit").
     """
     if not enabled or hold_mult <= 0:
         return None
@@ -1333,7 +1433,7 @@ def check_recovery_exit(
     )
     amount, units = _amount_and_units(trade.entry_price, trade=trade)
     spread_cost = units * trade.entry_spread if units else 0.0
-    green_threshold = SPREAD_RECOVERY_MULT * spread_cost
+    green_threshold = _spread_recovery_mult() * spread_cost
     hold_min = minutes_open(trade)
     required_min = hold_mult * avg_hold
 
@@ -1341,17 +1441,45 @@ def check_recovery_exit(
         trade = _open.get(bot_id)
         if not trade:
             return None
+        if trade.breakeven_set:
+            return None   # floor already in place — stop/trail handle it from here
         if not trade.recovery_armed:
             if trade.peak_pnl <= green_threshold and hold_min >= required_min:
                 trade.recovery_armed = True
                 log.info(
                     "Recovery exit armed on %s (%s): underwater %.0f min "
-                    "(≥ %.0f min = %.1f× %.0f min avg hold) — will close at ≥$0",
+                    "(≥ %.0f min = %.1f× %.0f min avg hold) — %s at ≥$0",
                     trade.instrument_label, strat, hold_min, required_min,
                     hold_mult, avg_hold,
+                    "breakeven floor" if breakeven_stop else "will close",
                 )
         if not trade.recovery_armed or pnl_d < 0:
             return None
+
+        if breakeven_stop:
+            # ── Breakeven floor: lock in "no loss", keep the upside open ──────
+            # Raise (never widen) both the hard stop and the chandelier level to
+            # the entry price.  TP and the ATR trail stay live: a breakout keeps
+            # running; a roll-over closes at ~$0 via check_stop_loss.
+            be = float(trade.entry_price)
+            if trade.direction == "LONG":
+                trade.stop_loss_price = max(trade.stop_loss_price or 0.0, be)
+                trade.trail_stop_price = max(trade.trail_stop_price or 0.0, be)
+            else:
+                trade.stop_loss_price = (
+                    min(trade.stop_loss_price, be) if trade.stop_loss_price > 0 else be
+                )
+                prev_trail = trade.trail_stop_price
+                trade.trail_stop_price = be if prev_trail <= 0 else min(prev_trail, be)
+            trade.breakeven_set = True
+            trade.recovery_armed = False
+            log.info(
+                "Breakeven floor set on %s (%s): stop -> entry %.5f after "
+                "%.0f min underwater; TP/ATR-trail keep the upside open",
+                trade.instrument_label, strat, be, hold_min,
+            )
+            return None
+
         del _open[bot_id]
         _closing[bot_id] = trade
 
@@ -1538,6 +1666,10 @@ def open_trade(
             atr_pct_entry=float(atr_pct or 0.0),
             stop_pct_entry=float(stop_pct_used),
             confidence_calibrated=int(confidence_calibrated or 0),
+            # Chandelier trail starts AT the entry 2xATR hard stop and only
+            # ratchets in the trade's favour from here.
+            peak_price=float(entry_price),
+            trail_stop_price=float(stop_loss),
         )
 
         with _lock:
@@ -1599,6 +1731,10 @@ def _finalize_close(
         exit_price = ask
         profit = trade.entry_price - ask
 
+    # Real dollar P&L: per-unit price move × units held.
+    _units = (trade.trade_amount / trade.entry_price) if (trade.trade_amount and trade.entry_price) else 0.0
+    _pnl_dollars = profit * _units
+
     closed = ClosedTrade(
         instrument_id=trade.instrument_id,
         instrument_label=trade.instrument_label,
@@ -1619,6 +1755,7 @@ def _finalize_close(
         llm_reasoning=llm_reasoning,
         llm_observations=llm_observations,
         shadow=getattr(trade, "shadow", False),
+        pnl_dollars=round(_pnl_dollars, 4),
     )
     with _lock:
         _closing.pop(trade.bot_id, None)
@@ -1651,6 +1788,17 @@ def check_stop_loss(
             return None
         del _open[bot_id]
         _closing[bot_id] = trade
+    # A stop raised to entry by the recovery breakeven floor closes at ~$0 —
+    # journal it distinctly so analytics separate "saved from loss" from real
+    # stop-loss damage.
+    if getattr(trade, "breakeven_set", False):
+        return _finalize_close(
+            trade, ask, bid, "breakeven_stop", client,
+            llm_reasoning=(
+                "Breakeven floor hit: price rolled back to entry after the "
+                "recovery arm — closed at ~no loss instead of riding red again"
+            ),
+        )
     return _finalize_close(trade, ask, bid, "stop_loss", client)
 
 

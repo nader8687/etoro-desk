@@ -240,7 +240,7 @@ def _free_cash_and_resize(
     Returns the re-computed SizeDecision (amount may still be 0 → genuine skip)."""
     import position_sizer, cash_manager
     new_edge = cash_manager.signal_edge(config.strategy_name, confidence)
-    if new_edge < cash_manager.MIN_EDGE_TO_FREE:
+    if new_edge < cash_manager.min_edge_to_free():
         return decision  # too weak to justify touching the book
 
     # Only act when CASH is the actual bottleneck.  If spendable (at the normal
@@ -252,6 +252,25 @@ def _free_cash_and_resize(
     except Exception:
         spendable = 0.0
     if spendable >= position_sizer.min_trade_usd():
+        return decision
+
+    # CAPACITY PRECHECK — never pay for cash the risk gate won't let us spend.
+    # The amount-independent hard caps (concurrent count, per-asset, cluster
+    # crowding, drawdown halt) run AFTER sizing in _maybe_open_trade; without
+    # this check we could trim live positions (paying spread) to fund a trade
+    # those caps then block regardless of size.
+    import risk_manager
+    _pre = risk_manager.capacity_precheck(
+        direction="LONG" if signal.upper() == "BUY" else "SHORT",
+        instrument_id=instrument_id,
+        instrument_label=config.instrument_label,
+        equity=float(getattr(decision, "equity", 0.0) or 0.0),
+    )
+    if _pre.blocked:
+        log.info(
+            "Cash freeing skipped on %s (%s): risk capacity blocked — %s",
+            config.instrument_label, config.strategy_name, _pre.reason,
+        )
         return decision
 
     def _resize():
@@ -954,8 +973,62 @@ def _dispatch_strategy(
 
 
 def _bot_engine_active(config: EngineConfig, bot_key: str) -> bool:
-    """True when this bot should run its tick loop (auto-trade ON, not disabled)."""
+    """True when the user has auto-trade enabled (not manually disabled)."""
     return bool(config.trading_active and bot_key not in _disabled_bots)
+
+
+def is_user_auto_trade_enabled(instrument_id: int, bot_id: Optional[str] = None) -> bool:
+    """User intent: auto-trade ON and not in the persisted OFF set."""
+    with _lock:
+        key = _resolve_bot_key(instrument_id, bot_id)
+        state = _engines.get(key) if key else None
+        return bool(state and _bot_engine_active(state.config, key))
+
+
+def _market_open_for_state(state: _EngineState) -> bool:
+    """True when this instrument's market session allows trading (cached ~60s)."""
+    try:
+        return bool(state.client and state.client.is_market_open(state.config.instrument_id))
+    except Exception:
+        return True
+
+
+def _sync_bot_market_hours(bot_key: str) -> None:
+    """Stop bots while their market is closed; resume when it reopens if still enabled."""
+    with _lock:
+        state = _engines.get(bot_key)
+        if state is None or not _bot_engine_active(state.config, bot_key):
+            return
+        wants_run = True
+        running = state.running
+        client = state.client
+        iid = state.config.instrument_id
+        label = state.config.instrument_label
+    if not client:
+        return
+    try:
+        open_ = client.is_market_open(iid)
+    except Exception:
+        return
+    with _lock:
+        state = _engines.get(bot_key)
+        if state is None:
+            return
+        was_closed = state.market_closed
+        state.market_closed = not open_
+    if not open_ and running:
+        stop_bot(bot_key)
+        log.info("Market closed for %s — bot %s stopped", label, bot_key)
+    elif open_ and was_closed and wants_run:
+        _ensure_engine_thread(bot_key)
+        log.info("Market reopened for %s — bot %s resumed", label, bot_key)
+
+
+def _sync_all_market_hours() -> None:
+    with _lock:
+        keys = list(_engines.keys())
+    for k in keys:
+        _sync_bot_market_hours(k)
 
 
 def _ensure_engine_thread(bot_key: str) -> None:
@@ -964,6 +1037,17 @@ def _ensure_engine_thread(bot_key: str) -> None:
         state = _engines.get(bot_key)
         if state is None:
             return
+        if not _bot_engine_active(state.config, bot_key):
+            return
+        if not _market_open_for_state(state):
+            state.running = False
+            state.market_closed = True
+            log.info(
+                "Market closed for %s — bot %s idle until session opens",
+                state.config.instrument_label, bot_key,
+            )
+            return
+        state.market_closed = False
         state.running = True
         if state.thread is not None and state.thread.is_alive():
             return
@@ -1040,13 +1124,19 @@ def _run_tick(bot_id: str, state: _EngineState) -> None:
     # signals (saves LLM calls overnight).  Crypto is 24/7 → always open.
     # is_market_open is cached (60s/instrument) so this never adds tick latency.
     market_open = client.is_market_open(instrument_id)
-    if not market_open and not state.market_closed:
-        log.info("Market closed for %s — pausing orders/signals for bot %s",
-                 config.instrument_label, bot_id)
-    elif market_open and state.market_closed:
+    if not market_open:
+        if not state.market_closed:
+            log.info(
+                "Market closed for %s — stopping bot %s",
+                config.instrument_label, bot_id,
+            )
+        state.market_closed = True
+        stop_bot(bot_id)
+        return
+    if state.market_closed:
         log.info("Market reopened for %s — resuming bot %s",
                  config.instrument_label, bot_id)
-    state.market_closed = not market_open
+        state.market_closed = False
 
     # ── Adoption (per bot) ────────────────────────────────────────────────────
     # Each bot re-adopts ITS OWN orphaned eToro position (matched via the
@@ -1167,68 +1257,63 @@ def _run_tick(bot_id: str, state: _EngineState) -> None:
         trade_manager.reconcile_from_etoro(state.bot_uuid, etoro_pos)
 
     if latest and trade_owned_by_us and market_open:
-        # ── 1. Hard stop-loss (always first — downside protection) ──────────
-        closed = trade_manager.check_stop_loss(
-            state.bot_uuid, latest["ask"], latest["bid"], client
-        )
-        # ── 2. Recovery exit — long red, close when P&L crosses ≥ $0 ────────
+        # ── Protective-exit ladder ────────────────────────────────────────────
+        # SEQUENTIAL by priority — each check runs unless an earlier one already
+        # closed the trade.  (A previous elif-chain meant a bot with BOTH a
+        # take-profit and a trailing stop — the whole mean-revert family — never
+        # ran its trailing check at all: TP's branch masked it every tick.)
+        #   1. hard stop-loss (incl. breakeven floor)   — downside, always first
+        #   2. recovery exit / breakeven-floor arming   — overstayed-red rescue
+        #   3. take-profit target                       — banks the move up
+        #   4. chandelier ATR trailing stop             — protects the peak
+        ask_, bid_ = latest["ask"], latest["bid"]
+        closed = trade_manager.check_stop_loss(state.bot_uuid, ask_, bid_, client)
         if not closed:
             try:
                 import user_settings
                 _beh = user_settings.behavior_settings()
                 _rec_on = _beh.recovery_exit_enabled
                 _rec_mult = float(_beh.recovery_hold_mult)
+                _rec_be = bool(getattr(_beh, "recovery_breakeven_stop", True))
             except Exception:
-                _rec_on, _rec_mult = True, 2.5
+                _rec_on, _rec_mult, _rec_be = True, 2.5, True
             closed = trade_manager.check_recovery_exit(
-                state.bot_uuid, latest["ask"], latest["bid"],
+                state.bot_uuid, ask_, bid_,
                 config.strategy_name, client,
                 enabled=_rec_on, hold_mult=_rec_mult,
+                breakeven_stop=_rec_be,
+            )
+        if not closed and config.take_profit_pct > 0:
+            closed = trade_manager.check_take_profit(
+                state.bot_uuid, ask_, bid_, config.take_profit_pct, client,
+            )
+        if not closed and config.trailing_stop_pct > 0:
+            # Chandelier ATR trail (golden rule 2xATR).  Live ATR% comes from
+            # the per-candle regime memo — zero extra cost per tick; without
+            # ATR the legacy %-from-peak trail applies unchanged.
+            _atr_now = None
+            try:
+                if chart_data is not None and len(chart_data) > 0:
+                    _atr_now = _classify_regime_memo(instrument_id, chart_data).atr_pct or None
+            except Exception:
+                _atr_now = None
+            import exit_profiles as _ep
+            closed = trade_manager.check_trailing_stop(
+                state.bot_uuid, ask_, bid_,
+                config.trailing_stop_pct, client,
+                atr_pct=_atr_now,
+                atr_mult=_ep.atr_trail_mult(config.strategy_name),
             )
         if closed:
             with _lock:
                 _last_closes[instrument_id] = closed
             _bump_portfolio()
-            _reason = closed.reason or "close"
             engine_notify.push(
                 "trade_close",
-                f"Closed {config.instrument_label} ({_reason}) — {closed.profit:+.5f}",
+                f"Closed {config.instrument_label} ({closed.reason or 'close'})"
+                f" — ${closed.pnl_dollars:+.2f} ({closed.profit:+.5f} px)",
                 instrument_id=instrument_id,
             )
-        elif config.take_profit_pct > 0:
-            # ── 2. Hard take-profit target (fires on the way up) ────────────
-            tp_closed = trade_manager.check_take_profit(
-                state.bot_uuid, latest["ask"], latest["bid"],
-                config.take_profit_pct, client,
-            )
-            if tp_closed:
-                with _lock:
-                    _last_closes[instrument_id] = tp_closed
-                _bump_portfolio()
-                pct = config.take_profit_pct
-                engine_notify.push(
-                    "trade_close",
-                    f"Closed {config.instrument_label} (take profit +{pct}%)"
-                    f" — {tp_closed.profit:+.5f}",
-                    instrument_id=instrument_id,
-                )
-        elif config.trailing_stop_pct > 0:
-            # ── 3. Trailing stop (fires on pullback from peak) ───────────────
-            trail_closed = trade_manager.check_trailing_stop(
-                state.bot_uuid, latest["ask"], latest["bid"],
-                config.trailing_stop_pct, client,
-            )
-            if trail_closed:
-                with _lock:
-                    _last_closes[instrument_id] = trail_closed
-                _bump_portfolio()
-                pct = config.trailing_stop_pct
-                engine_notify.push(
-                    "trade_close",
-                    f"Closed {config.instrument_label} (trailing stop -{pct}% from peak)"
-                    f" — {trail_closed.profit:+.5f}",
-                    instrument_id=instrument_id,
-                )
 
     last_committed_time = chart.last_committed_time
     new_candle_closed = False
@@ -1308,7 +1393,7 @@ def _run_tick(bot_id: str, state: _EngineState) -> None:
                     _bump_portfolio()
                     engine_notify.push(
                         "trade_close",
-                        f"Closed {config.instrument_label} — {_closed.profit:+.5f}",
+                        f"Closed {config.instrument_label} — ${_closed.pnl_dollars:+.2f} ({_closed.profit:+.5f} px)",
                         instrument_id=instrument_id,
                     )
         elif config.trading_active:
@@ -1359,7 +1444,7 @@ def _run_tick(bot_id: str, state: _EngineState) -> None:
                 _bump_portfolio()
                 engine_notify.push(
                     "trade_close",
-                    f"Closed {config.instrument_label} — {closed.profit:+.5f}",
+                    f"Closed {config.instrument_label} — ${closed.pnl_dollars:+.2f} ({closed.profit:+.5f} px)",
                     instrument_id=instrument_id,
                 )
 
@@ -1781,12 +1866,13 @@ def set_auto_trade(instrument_id: int, active: bool, bot_id: Optional[str] = Non
 
 
 def is_auto_trade(instrument_id: int, bot_id: Optional[str] = None) -> bool:
+    """Effective auto-trade: user enabled AND the instrument's market is open."""
     with _lock:
         key = _resolve_bot_key(instrument_id, bot_id)
         state = _engines.get(key) if key else None
-        # A disabled bot is OFF regardless of trading_active — the disabled set is
-        # the single authority, so the UI can never show a turned-off bot as ON.
-        return bool(state and state.config.trading_active and key not in _disabled_bots)
+        if not (state and _bot_engine_active(state.config, key)):
+            return False
+    return _market_open_for_state(state)
 
 
 def refresh_all_exit_params() -> int:
@@ -1868,12 +1954,13 @@ def engine_count() -> int:
 
 
 def auto_trade_count() -> int:
-    """Return the number of bots with auto-trade ON (excludes persisted OFF set)."""
+    """Bots effectively trading (user ON and market open)."""
     with _lock:
-        return sum(
-            1 for k, s in _engines.items()
-            if s.config.trading_active and k not in _disabled_bots
-        )
+        items = list(_engines.items())
+    return sum(
+        1 for k, s in items
+        if _bot_engine_active(s.config, k) and _market_open_for_state(s)
+    )
 
 
 def active_engine_count() -> int:
@@ -1978,6 +2065,7 @@ def clear_trade_error(instrument_id: int) -> None:
 def _supervisor_loop() -> None:
     while True:
         try:
+            _sync_all_market_hours()
             if _desired_live:
                 with _lock:
                     items = list(_engines.items())

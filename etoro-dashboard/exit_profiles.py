@@ -24,6 +24,7 @@ next bot start / strategy change (no schema migration needed).
 """
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, replace
 from typing import Optional
 
@@ -49,10 +50,15 @@ class ExitProfile:
 #     4:1 inverse payoff; 0.5% stop makes it symmetric.
 #   • llm: model manages the exit per candle; 2.0% hard TP is a backstop so
 #     winning LLM positions don't sit open indefinitely when the model holds.
-TREND       = ExitProfile(trailing_stop_pct=2.0, take_profit_pct=2.0, stop_loss_min_pct=2.5, kind="trend")
+# TREND/LLM take_profit_pct = 0 ON PURPOSE: trend expectancy lives in the fat
+# right tail (journal: ichimoku pf 4.5 from avg wins 2x avg losses).  A hard +%
+# cap amputates exactly that tail while reducing NO risk — the 2xATR chandelier
+# trail already protects gains dynamically.  Mean-revert keeps its quick TP:
+# banking fast is that family's actual edge.
+TREND       = ExitProfile(trailing_stop_pct=2.0, take_profit_pct=0.0, stop_loss_min_pct=2.5, kind="trend")
 MEAN_REVERT = ExitProfile(trailing_stop_pct=1.0, take_profit_pct=1.2, stop_loss_min_pct=1.0, kind="mean_revert")
 ARB         = ExitProfile(trailing_stop_pct=0.0, take_profit_pct=0.6, stop_loss_min_pct=0.5, kind="arb")
-LLM         = ExitProfile(trailing_stop_pct=2.0, take_profit_pct=2.0, stop_loss_min_pct=2.5, kind="llm")
+LLM         = ExitProfile(trailing_stop_pct=2.0, take_profit_pct=0.0, stop_loss_min_pct=2.5, kind="llm")
 
 # ── Strategy → profile mapping ────────────────────────────────────────────────
 PROFILES: dict[str, ExitProfile] = {
@@ -203,18 +209,73 @@ def stop_loss_min_pct(strategy_key: str, instrument_label: str = "") -> float:
 # so it can never exceed STOP_WIDEN_MAX x the floor — giving every strategy the
 # same "amount of normal noise" of room regardless of regime:
 #   stop_pct = clamp(k x atr_pct, floor, floor x STOP_WIDEN_MAX)
-# k (ATR multiple) by behaviour class — trend needs more room than arb:
+#
+# GOLDEN RULE (Wilder tradition; standard across the stop-loss literature):
+# k = 2.0 x ATR(14) for BOTH the entry stop and the chandelier trailing stop.
+# Research backing the default:
+#   • TR = max(H−L, |H−Cprev|, |L−Cprev|); ATR = Wilder RMA(TR, 14) — exactly
+#     what regime._wilder computes (ewm alpha=1/14, the canonical smoothing).
+#   • 2x ATR is the canonical swing/intraday setting (day 1.5–2x, swing 2–3x,
+#     position 3–4x); a 1,000-trade study found 2x ATR stops cut max drawdown
+#     ~32% vs fixed-distance stops.
+#   • A volatility stop must keep a HARD CAP — in a panic ATR explodes and an
+#     uncapped 2xATR stop becomes a catastrophic-loss stop.  The clamp
+#     (floor x STOP_WIDEN_MAX) is that cap; the floor guards against
+#     spread-noise stops in dead markets.
+# Override globally with ATR_STOP_MULT / ATR_TRAIL_MULT env vars.
+GOLDEN_ATR_MULT    = 2.0
+ATR_STOP_MULT_ENV  = float(os.environ.get("ATR_STOP_MULT",  str(GOLDEN_ATR_MULT)))
+ATR_TRAIL_MULT_ENV = float(os.environ.get("ATR_TRAIL_MULT", str(GOLDEN_ATR_MULT)))
 ATR_MULT_BY_KIND: dict[str, float] = {
-    "trend":       2.5,
-    "llm":         2.5,
-    "mean_revert": 1.5,
-    "arb":         1.0,
+    "trend":       ATR_STOP_MULT_ENV,
+    "llm":         ATR_STOP_MULT_ENV,
+    "mean_revert": ATR_STOP_MULT_ENV,
+    "arb":         ATR_STOP_MULT_ENV,
 }
-STOP_WIDEN_MAX = 3.0   # stop may grow up to 3x the floor in a vol spike
+STOP_WIDEN_MAX = 3.0   # hard cap: stop may grow to at most 3x the floor in a vol spike
+
+
+def _atr_user():
+    """User-saved ATR settings (Settings tab) — None when unavailable.
+
+    Lazy + fail-open so a settings hiccup can never affect stop placement."""
+    try:
+        import user_settings
+        return user_settings.atr_settings()
+    except Exception:
+        return None
 
 
 def atr_mult(strategy_key: str) -> float:
-    return ATR_MULT_BY_KIND.get(profile(strategy_key).kind, 2.0)
+    """Entry-stop ATR multiple — Settings-tab value per behaviour class,
+    falling back to the env/golden-rule defaults."""
+    kind = profile(strategy_key).kind
+    s = _atr_user()
+    if s is not None:
+        return float({
+            "trend":       s.stop_mult_trend,
+            "llm":         s.stop_mult_llm,
+            "mean_revert": s.stop_mult_mean_revert,
+            "arb":         s.stop_mult_arb,
+        }.get(kind, GOLDEN_ATR_MULT))
+    return ATR_MULT_BY_KIND.get(kind, GOLDEN_ATR_MULT)
+
+
+def atr_trail_mult(strategy_key: str) -> float:
+    """ATR multiple for the CHANDELIER trailing stop — golden rule 2.0x,
+    editable on the Settings tab (env ATR_TRAIL_MULT as fallback)."""
+    s = _atr_user()
+    if s is not None:
+        return float(s.trail_mult)
+    return ATR_TRAIL_MULT_ENV
+
+
+# When ATR drives the stop, the only LOWER bound is a small noise floor —
+# the spread-based widening in trade_manager.compute_stop_loss_price already
+# guards against spread-noise stopouts.  (Using the old fixed floor as a lower
+# bound silently disabled the ATR stop: 2xATR on intraday bars is usually
+# tighter than the 2.5% calm-market floor, so the floor always won.)
+ATR_STOP_NOISE_FLOOR_PCT = float(os.environ.get("ATR_STOP_NOISE_FLOOR_PCT", "0.10"))
 
 
 def adaptive_stop_pct(
@@ -222,16 +283,23 @@ def adaptive_stop_pct(
     instrument_label: str = "",
     atr_pct: Optional[float] = None,
 ) -> float:
-    """Regime-aware stop distance (% of entry).
+    """Volatility-based stop distance (% of entry) — golden rule 2xATR.
 
-    Falls back to the fixed floor when no ATR% is supplied, so callers that
-    cannot compute ATR keep the exact previous behaviour.
+    With a live ATR%, the stop IS k·ATR (k = 2.0 by default), bounded by:
+      lower — ATR_STOP_NOISE_FLOOR_PCT (tiny; spread protection lives in
+              compute_stop_loss_price), and
+      upper — the panic-vol HARD CAP (fixed floor x STOP_WIDEN_MAX), the
+              research-mandated max-loss rule for when ATR explodes.
+    Without ATR, falls back to the fixed per-strategy floor (old behaviour).
     """
     floor = stop_loss_min_pct(strategy_key, instrument_label)
     if atr_pct is None or atr_pct <= 0:
         return floor
     k = atr_mult(strategy_key)
-    return float(min(max(k * atr_pct, floor), floor * STOP_WIDEN_MAX))
+    s = _atr_user()
+    noise = float(s.noise_floor_pct) if s is not None else ATR_STOP_NOISE_FLOOR_PCT
+    widen = float(s.widen_max) if s is not None else STOP_WIDEN_MAX
+    return float(min(max(k * atr_pct, noise), floor * widen))
 
 
 # ── Position-size share of the per-trade dollar cap ─────────────────────────────

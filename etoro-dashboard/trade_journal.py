@@ -54,7 +54,10 @@ JOURNAL_PATH = Path(os.environ.get("TRADE_JOURNAL_PATH", "/tmp/etoro_trade_journ
 # core anti-overfitting lever: small samples are noise, so they never veto.
 MIN_BUCKET_N      = 8
 # A bucket is "clearly losing" only when BOTH conditions hold on a real sample.
-LOSE_WINRATE_MAX  = 0.40    # ≤ 40 % winners
+LOSE_WINRATE_MAX  = 0.60    # ≤ 60 % winners — raised from 0.40: the journal's
+                            # documented failure mode is HIGH-winrate buckets
+                            # that still lose money (win pennies, lose big); at
+                            # 0.40 the veto could never see them.
 LOSE_PROFIT_FACTOR_MAX = 0.75   # gross wins / gross losses < 0.75
 # Confidence buckets used for slicing + guidance.
 CONF_LOW_MAX  = 55          # < 55  -> "low"
@@ -664,7 +667,7 @@ def llm_memory_block(
     a fresh system.  Never prescriptive beyond evidence-grounded lessons.
     """
     rows = _filtered(instrument_id, strategy or None)
-    if len(rows) < MIN_BUCKET_N:
+    if len(rows) < _learning_thresholds()[0]:
         return ""
     rows = rows[-max_trades:]
     o = _agg(rows)
@@ -734,7 +737,7 @@ def exit_memory_block(
     wisdom.  Empty until enough history exists.
     """
     rows = _filtered(instrument_id, strategy or None)
-    if len(rows) < MIN_BUCKET_N:
+    if len(rows) < _learning_thresholds()[0]:
         return ""
     rows = rows[-_MEM_WINDOW:]
     by_reason = _group_agg(rows, lambda r: r.get("reason") or "?")

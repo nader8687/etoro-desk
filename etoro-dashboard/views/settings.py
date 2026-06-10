@@ -104,7 +104,10 @@ def _exit_profile_fields(kind: str, data: dict) -> dict:
 
             key=f"set_exit_{kind}_trail",
 
-            help="Pullback from peak profit before closing (0 = off).",
+            help="Legacy %-from-peak trail: closes when price pulls back this % "
+                 "from the best price since entry (only after the trade has been "
+                 "in profit). 0 = off.  When live ATR is available the chandelier "
+                 "trail (ATR section) takes over instead.",
 
         )
 
@@ -118,7 +121,9 @@ def _exit_profile_fields(kind: str, data: dict) -> dict:
 
             key=f"set_exit_{kind}_tp",
 
-            help="Hard +% target on entry (0 = off).",
+            help="Hard take-profit: close automatically once unrealised gain "
+                 "reaches this % above entry. 0 = disabled (let winners run with "
+                 "trailing stop only).  Checked every tick before trailing.",
 
         )
 
@@ -132,7 +137,9 @@ def _exit_profile_fields(kind: str, data: dict) -> dict:
 
             key=f"set_exit_{kind}_sl",
 
-            help="Minimum stop distance as % of entry (may widen with volatility).",
+            help="Minimum hard stop distance as % of entry price.  The actual stop "
+                 "may be wider when ATR volatility sizing is active (see ATR stops). "
+                 "Also scaled down for stocks vs crypto.",
 
         )
 
@@ -160,7 +167,7 @@ def render() -> None:
 
         "tick (risk, sizing, learning) or immediately to running bots (exit params). "
 
-        "Rebuild is **not** required."
+        "Rebuild is **not** required.  Hover the **?** next to any field for what it does."
 
     )
 
@@ -200,7 +207,139 @@ def render() -> None:
 
             st.rerun()
 
+    # ── ATR stops (volatility exits) ──────────────────────────────────────────
+    st.markdown("#### ATR stops (volatility exits)")
+    st.caption(
+        "Stops sized from live volatility — **k × ATR(14)**, Wilder smoothing. "
+        "Entry stop multipliers are per strategy class (research: trend needs "
+        "2.5–3×, mean-reversion ~2×, arb ~1.5×); the **chandelier trailing** "
+        "stop ratchets from the peak at the golden-rule 2× and never widens. "
+        "Applies to NEW entries and to every trailing check immediately; an "
+        "existing position's server-side hard stop keeps its entry value."
+    )
+    atr_cfg = cfg.get("atr", {})
+    with st.form("settings_atr", border=True):
+        a1, a2 = st.columns(2)
+        m_trend = a1.number_input(
+            "Entry stop — trend (× ATR)", min_value=0.5, max_value=6.0, step=0.25,
+            value=float(atr_cfg.get("stop_mult_trend", 2.5)),
+            help="Multiplier on ATR(14) for the initial hard stop on trend/momentum "
+                 "bots (supertrend, ma_crossover, macd, adx, ichimoku, orb, donchian). "
+                 "Stop distance = this × current ATR%.  Higher = more room before stop-out.",
+        )
+        m_llm = a1.number_input(
+            "Entry stop — LLM (× ATR)", min_value=0.5, max_value=6.0, step=0.25,
+            value=float(atr_cfg.get("stop_mult_llm", 2.5)),
+            help="ATR multiplier for LLM-driven bots.  The model decides exits each "
+                 "candle; this sets how far the mechanical hard stop sits below/above "
+                 "entry when the position opens.",
+        )
+        m_mr = a1.number_input(
+            "Entry stop — mean-revert (× ATR)", min_value=0.5, max_value=6.0, step=0.25,
+            value=float(atr_cfg.get("stop_mult_mean_revert", 2.0)),
+            help="ATR multiplier for mean-reversion / oscillator bots (rsi, stoch_rsi, "
+                 "bollinger_squeeze, mean_reversion, candlestick).  Usually tighter "
+                 "than trend because bounces are expected to resolve quickly.",
+        )
+        m_arb = a1.number_input(
+            "Entry stop — arb (× ATR)", min_value=0.5, max_value=6.0, step=0.25,
+            value=float(atr_cfg.get("stop_mult_arb", 1.5)),
+            help="ATR multiplier for arbitrage bots (stat_arb, rate_arb).  Smallest "
+                 "multiplier — arb edges are tiny so stops must stay tight.",
+        )
+        m_trail = a2.number_input(
+            "Chandelier trail (× ATR) — golden rule 2.0",
+            min_value=0.5, max_value=6.0, step=0.25,
+            value=float(atr_cfg.get("trail_mult", 2.0)),
+            help="Chandelier trailing stop: distance from the best price since entry "
+                 "= this × ATR%.  Active from entry, ratchets only in your favour, "
+                 "recomputed each candle.  Fires as 'trailing_stop' in the journal.",
+        )
+        nfloor = a2.number_input(
+            "Noise floor (min stop %)", min_value=0.01, max_value=2.0, step=0.01,
+            value=float(atr_cfg.get("noise_floor_pct", 0.10)),
+            help="Minimum stop width in calm markets.  ATR-sized stops cannot be "
+                 "tighter than this % — prevents getting stopped out by spread/noise "
+                 "when volatility reads very low.",
+        )
+        widen = a2.number_input(
+            "Panic cap (× fixed floor)", min_value=1.0, max_value=6.0, step=0.5,
+            value=float(atr_cfg.get("widen_max", 3.0)),
+            help="Upper cap when volatility spikes.  ATR stop may widen in panics; "
+                 "it will never exceed the strategy's fixed stop-loss floor × this "
+                 "value (prevents runaway wide stops).",
+        )
+        if st.form_submit_button("Save ATR stops", type="primary"):
+            user_settings.save(atr={
+                "stop_mult_trend": float(m_trend),
+                "stop_mult_llm": float(m_llm),
+                "stop_mult_mean_revert": float(m_mr),
+                "stop_mult_arb": float(m_arb),
+                "trail_mult": float(m_trail),
+                "noise_floor_pct": float(nfloor),
+                "widen_max": float(widen),
+            })
+            st.success("ATR stop settings saved — applied on the next tick.")
+            st.rerun()
 
+    # ── Cash freeing ──────────────────────────────────────────────────────────
+    st.markdown("#### Cash freeing")
+    st.caption(
+        "Guardrails for funding a strong signal when spendable cash is short: "
+        "first the reserve floor relaxes (closes nothing), then the weakest "
+        "open positions are partially trimmed — edge-gated and rate-limited."
+    )
+    cf = cfg.get("cash_freeing", {})
+    with st.form("settings_cash_freeing", border=True):
+        c1, c2 = st.columns(2)
+        cf_edge = c1.number_input(
+            "Min signal edge to free cash", min_value=0.1, max_value=1.5, step=0.05,
+            value=float(cf.get("min_edge_to_free", 0.50)),
+            help="Edge = strategy performance × confidence (~0–1.4). Below this, "
+                 "a cash-short signal is skipped rather than touching the book.",
+        )
+        cf_margin = c1.number_input(
+            "Edge margin over victim", min_value=0.0, max_value=1.0, step=0.05,
+            value=float(cf.get("edge_margin", 0.15)),
+            help="The new signal must beat a trimmed position's forward edge by "
+                 "at least this much.",
+        )
+        cf_age = c1.number_input(
+            "Min position age before trim (s)", min_value=0.0, max_value=3600.0, step=30.0,
+            value=float(cf.get("min_position_age_sec", 120.0)),
+            help="A position must be open at least this many seconds before it can "
+                 "be chosen as a cash-freeing trim victim.  Stops brand-new entries "
+                 "from being closed immediately to fund another signal.",
+        )
+        cf_cool = c2.number_input(
+            "Trim cooldown per position (s)", min_value=0.0, max_value=3600.0, step=30.0,
+            value=float(cf.get("trim_cooldown_sec", 120.0)),
+            help="After a position is partially trimmed, it cannot be trimmed again "
+                 "until this cooldown elapses.  Reduces churn from repeated partial closes.",
+        )
+        cf_frac = c2.number_input(
+            "Max trim fraction of a position", min_value=0.05, max_value=0.95, step=0.05,
+            value=float(cf.get("max_trim_fraction", 0.75)),
+            help="Largest share of a victim position that cash-freeing may close in "
+                 "one trim (e.g. 0.75 = up to 75% of units).  The rest stays open.",
+        )
+        cf_keep = c2.number_input(
+            "Min $ left in a trimmed position", min_value=50.0, max_value=2000.0, step=50.0,
+            value=float(cf.get("keep_min_usd", 200.0)),
+            help="After a partial trim, at least this much notional must remain in the "
+                 "position.  Works with max trim fraction to avoid dust positions.",
+        )
+        if st.form_submit_button("Save cash freeing", type="primary"):
+            user_settings.save(cash_freeing={
+                "min_edge_to_free": float(cf_edge),
+                "edge_margin": float(cf_margin),
+                "min_position_age_sec": float(cf_age),
+                "trim_cooldown_sec": float(cf_cool),
+                "max_trim_fraction": float(cf_frac),
+                "keep_min_usd": float(cf_keep),
+            })
+            st.success("Cash-freeing settings saved — applied on the next signal.")
+            st.rerun()
 
     st.markdown("---")
 
@@ -216,7 +355,13 @@ def render() -> None:
 
         r1, r2 = st.columns(2)
 
-        enabled = r1.toggle("Risk manager enabled", value=bool(risk.get("enabled", True)))
+        enabled = r1.toggle(
+            "Risk manager enabled",
+            value=bool(risk.get("enabled", True)),
+            help="Master switch for portfolio risk checks before each new entry. "
+                 "When off, bots may open trades without position-count, exposure, "
+                 "or drawdown limits (not recommended).",
+        )
 
         max_pos = r1.number_input(
 
@@ -225,6 +370,9 @@ def render() -> None:
             min_value=1, max_value=50, step=1,
 
             value=int(risk.get("max_concurrent_positions", 12)),
+
+            help="Maximum number of open bot positions at once across the whole "
+                 "account.  New entries are blocked when this cap is reached.",
 
         )
 
@@ -236,6 +384,9 @@ def render() -> None:
 
             value=float(risk.get("max_gross_exposure_pct", 60.0)),
 
+            help="Sum of all open position notionals (long + short) cannot exceed "
+                 "this % of account equity.  Limits total capital deployed.",
+
         )
 
         max_heat = r2.number_input(
@@ -245,6 +396,9 @@ def render() -> None:
             min_value=1.0, max_value=30.0, step=0.5,
 
             value=float(risk.get("max_portfolio_heat_pct", 6.0)),
+
+            help="Maximum total $ at risk if every open stop-loss hits at once, "
+                 "as a % of equity.  Keeps worst-case loss bounded.",
 
         )
 
@@ -258,6 +412,9 @@ def render() -> None:
 
             value=float(risk.get("max_cluster_gross_pct", 45.0)),
 
+            help="Per asset cluster (e.g. all EUR/USD bots): combined long+short "
+                 "notional cannot exceed this % of equity.  Stops over-concentration.",
+
         )
 
         cl_net = r3.number_input(
@@ -267,6 +424,9 @@ def render() -> None:
             min_value=5.0, max_value=50.0, step=1.0,
 
             value=float(risk.get("max_cluster_net_pct", 25.0)),
+
+            help="Per cluster: net directional exposure (longs minus shorts) cap "
+                 "as % of equity.  Limits one-sided bets on a single instrument.",
 
         )
 
@@ -278,6 +438,9 @@ def render() -> None:
 
             value=int(risk.get("max_same_dir_per_cluster", 6)),
 
+            help="How many open positions in the same direction (all long or all "
+                 "short) are allowed on one instrument cluster at once.",
+
         )
 
         per_asset = r4.number_input(
@@ -287,6 +450,9 @@ def render() -> None:
             min_value=1, max_value=10, step=1,
 
             value=int(risk.get("max_positions_per_asset", 4)),
+
+            help="Hard cap on open positions per instrument ID, regardless of "
+                 "direction.  Prevents too many bots stacking on one symbol.",
 
         )
 
@@ -714,9 +880,57 @@ def render() -> None:
 
             help="How long underwater before arming: e.g. 2.5× means if the "
 
-                 "strategy's avg hold is 40 min, close at ≥$0 after ~100 min red.",
+                 "strategy's avg hold is 40 min, act at ≥$0 after ~100 min red.",
 
             disabled=not recovery_on,
+
+        )
+
+        recovery_be = st.toggle(
+
+            "Breakeven stop instead of closing (recommended)",
+
+            value=bool(behavior.get("recovery_breakeven_stop", True)),
+
+            help="At recovery to ≥$0: raise the stop to the entry price and keep "
+
+                 "the position open — a breakout keeps running into the take-profit "
+
+                 "/ ATR trail, a roll-over closes at ~no loss ('breakeven_stop' in "
+
+                 "the journal).  Off = close immediately at ≥$0 (legacy).",
+
+            disabled=not recovery_on,
+
+        )
+
+        spread_rec_mult = st.number_input(
+
+            "Spread-recovery zone (× entry spread cost)",
+
+            min_value=0.5, max_value=6.0, step=0.5,
+
+            value=float(behavior.get("spread_recovery_mult", 2.0)),
+
+            help="A loss within this × the spread cost is 'just the spread' — the "
+
+                 "LLM never closes there, and 'meaningfully green' for recovery "
+
+                 "arming is measured against it.",
+
+        )
+
+        llm_cut_conf = st.number_input(
+
+            "LLM loss-cut minimum confidence (%)",
+
+            min_value=50, max_value=95, step=5,
+
+            value=int(behavior.get("llm_loss_cut_min_conf", 70)),
+
+            help="An LLM CLOSE on a real losing position only executes at or above "
+
+                 "this confidence; below it the trade rides to its mechanical stop.",
 
         )
 
@@ -729,6 +943,12 @@ def render() -> None:
                 "recovery_exit_enabled": recovery_on,
 
                 "recovery_hold_mult": float(recovery_mult),
+
+                "recovery_breakeven_stop": bool(recovery_be),
+
+                "spread_recovery_mult": float(spread_rec_mult),
+
+                "llm_loss_cut_min_conf": int(llm_cut_conf),
 
             })
 
@@ -832,21 +1052,37 @@ def render() -> None:
 
         column_config={
 
-            "bot": st.column_config.TextColumn("Bot", disabled=True),
+            "bot": st.column_config.TextColumn(
+                "Bot", disabled=True,
+                help="Bot key from instruments.toml — one row per configured bot.",
+            ),
 
-            "strategy": st.column_config.TextColumn("Strategy", disabled=True),
+            "strategy": st.column_config.TextColumn(
+                "Strategy", disabled=True,
+                help="Strategy assigned to this bot (determines default exit class).",
+            ),
 
-            "class": st.column_config.TextColumn("Class", disabled=True),
+            "class": st.column_config.TextColumn(
+                "Class", disabled=True,
+                help="Exit behaviour class: trend, mean_revert, arb, or llm — maps to "
+                     "the Exit profiles section above.",
+            ),
 
             "trailing %": st.column_config.NumberColumn(
 
                 "Trailing %", min_value=0.0, max_value=20.0, step=0.1, format="%.1f",
+
+                help="Override trailing stop % for this bot only.  Blank = use the "
+                     "strategy-class default from Exit profiles above.",
 
             ),
 
             "take-profit %": st.column_config.NumberColumn(
 
                 "Take-profit %", min_value=0.0, max_value=20.0, step=0.1, format="%.1f",
+
+                help="Override hard take-profit % for this bot only.  Blank = use "
+                     "the strategy-class default.  0 disables take-profit for that bot.",
 
             ),
 

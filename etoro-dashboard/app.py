@@ -2,7 +2,7 @@ import logging
 import os
 import threading
 import time
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time as dt_time, timedelta, timezone
 
 import pandas as pd
 import plotly.express as px
@@ -1036,19 +1036,21 @@ def _journal_period_label(mode: str, *, custom_start=None, custom_end=None) -> s
     return "all time"
 
 
-def _period_min_fetch_date(
-    mode: str,
-    *,
-    custom_start=None,
-) -> datetime.date:
-    """Earliest calendar date to pass to eToro history API for a period preset."""
+def _display_day_start_utc_date(local_day: date) -> date:
+    """Map midnight on *local_day* (display TZ) to the UTC calendar date eToro expects.
+
+    eToro history minDate is UTC-oriented.  Timestamps are UTC; we convert to the
+    display zone for period filters.  The API minDate must be the UTC date at the
+    start of the period in that zone — not the local calendar date string."""
+    start = datetime.combine(local_day, dt_time.min, tzinfo=timez.active_tz())
+    return start.astimezone(timezone.utc).date()
+
+
+def _period_logical_start(mode: str, *, custom_start=None) -> date:
+    """First calendar day of a History/P&L period in the display timezone."""
     today = datetime.now(timez.active_tz()).date()
-    if mode == "All time":
-        return ALL_HISTORY_START
-    if mode == "Custom":
-        if custom_start:
-            return max(ALL_HISTORY_START, custom_start)
-        return ALL_HISTORY_START
+    if mode == "Custom" and custom_start:
+        return max(ALL_HISTORY_START, custom_start)
     if mode == "Today":
         return today
     if mode == "Yesterday":
@@ -1058,6 +1060,20 @@ def _period_min_fetch_date(
     if mode == "30 days":
         return today - timedelta(days=29)
     return ALL_HISTORY_START
+
+
+def _period_min_fetch_date(
+    mode: str,
+    *,
+    custom_start=None,
+) -> datetime.date:
+    """Earliest minDate for eToro history — UTC date at period start (display TZ)."""
+    if mode == "All time":
+        return ALL_HISTORY_START
+    if mode == "Custom" and not custom_start:
+        return ALL_HISTORY_START
+    logical = _period_logical_start(mode, custom_start=custom_start)
+    return max(ALL_HISTORY_START, _display_day_start_utc_date(logical))
 
 
 def render_bot_session_trades(
@@ -3936,21 +3952,20 @@ def bots_live_fragment() -> None:
             seen_labels.add(spec.label)
             st.markdown(f"##### {spec.label}")
 
-        # Bot ON/OFF — computed once and reused for the badge + controls below.
+        # Effective ON = user enabled AND market open.  User intent is kept so
+        # bots auto-resume when the session reopens without a manual toggle.
         is_on = trading_engine.is_auto_trade(iid, bot_id=bot_key)
+        user_on = trading_engine.is_user_auto_trade_enabled(iid, bot_id=bot_key)
 
         # Feed status.  The tick stream is a SHARED per-instrument resource: a
         # sibling bot on the same asset — or that asset being open in the Trading
         # chart — keeps it live regardless of THIS bot's state.  Showing the raw
         # shared feed on an OFF bot made it read "live even though off" (and made
         # XRP look live while BTC idled simply because XRP was the charted asset).
-        # So the badge reflects the BOT: only an ON bot shows the live feed.
-        if not is_on:
+        # So the badge reflects the BOT: only an effectively ON bot shows the live feed.
+        if not user_on:
             feed_badge = "⚪ off"
-        elif client is not None and not client.is_market_open(iid):
-            # Stocks outside exchange hours: the bot is ON but paused — orders
-            # and signals are gated in the engine until the market reopens.
-            # (is_market_open is cached 60s/instrument — no render-path latency.)
+        elif not is_on:
             feed_badge = "🌙 MARKET CLOSED"
         else:
             ws_state  = tick_manager.get_state(iid)
@@ -4058,9 +4073,16 @@ def bots_live_fragment() -> None:
                 st.caption(f"Last signal: {last_sig}")
 
             with ctrl_col:
-                current_at = is_on
-                at_label   = "🤖 ON" if current_at else "🤖 OFF"
-                at_type    = "primary" if current_at else "secondary"
+                current_at = user_on
+                at_label   = "🤖 ON" if is_on else "🤖 OFF"
+                at_type    = "primary" if is_on else "secondary"
+                _at_help = (
+                    "Toggle auto-trade for this bot.  Shows OFF while the market "
+                    "is closed; resumes automatically at the next session if left "
+                    "enabled."
+                    if (user_on and not is_on)
+                    else "Toggle auto-trade for this bot"
+                )
                 # Use on_click= so the action fires in a callback (before rerun)
                 # rather than being checked inside the fragment body.  Callbacks
                 # are immune to the fragment timer firing at the same instant as
@@ -4068,7 +4090,7 @@ def bots_live_fragment() -> None:
                 st.button(
                     at_label, key=f"bot_at_{bot_key}",
                     type=at_type, use_container_width=True,
-                    help="Toggle auto-trade for this bot",
+                    help=_at_help,
                     on_click=_on_bot_toggle,
                     args=(bot_key, iid, current_at),
                 )

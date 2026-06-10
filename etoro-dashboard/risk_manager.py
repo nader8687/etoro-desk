@@ -54,13 +54,17 @@ CONFIG_PATH = Path(__file__).parent / "instruments.toml"
 class RiskLimits:
     enabled:                    bool  = True
     # Fleet-wide
-    max_concurrent_positions:   int   = 12     # of N bots, how many may be live at once
+    max_concurrent_positions:   int   = 14     # of N bots, how many may be live at once
     max_gross_exposure_pct:     float = 60.0   # Σ position $ ≤ this % of equity
-    max_portfolio_heat_pct:     float = 6.0    # Σ risk-to-stop $ ≤ this % of equity
+    # Heat sits BELOW daily_drawdown_halt_pct by design: the worst simultaneous
+    # stop-sweep must not be able to blow through the daily halt in one shot.
+    max_portfolio_heat_pct:     float = 4.0    # Σ risk-to-stop $ ≤ this % of equity
     # Per correlated cluster (e.g. all crypto)
     max_cluster_gross_pct:      float = 45.0   # Σ position $ in one cluster ≤ % equity
     max_cluster_net_pct:        float = 25.0   # |long$ − short$| in cluster ≤ % equity
-    max_same_dir_per_cluster:   int   = 6      # count of same-direction positions / cluster
+    # Tight on purpose: with XRP+BTC ≈ 0.8 correlated, the 5th+ same-direction
+    # position adds ~full risk and ~zero independent edge.
+    max_same_dir_per_cluster:   int   = 4      # count of same-direction positions / cluster
     # Per single asset
     max_positions_per_asset:    int   = 4      # how many bots may hold the same asset
     block_internal_hedge:       bool  = False  # don't open opposite a larger same-asset net
@@ -247,6 +251,84 @@ def _today_realised_pnl() -> float:
         return 0.0
 
 
+def _capacity_block(
+    d: str,
+    ps: "PortfolioState",
+    cluster: dict,
+    asset: dict,
+    limits: "RiskLimits",
+    eq: float,
+    instrument_label: str,
+    cl: str,
+) -> Optional[tuple[str, str]]:
+    """The AMOUNT-INDEPENDENT hard blocks, shared by check_new_trade and
+    capacity_precheck so the two can never drift apart.  Returns
+    (reason, capped_by) when blocked, else None."""
+    # 1. Drawdown kill-switch
+    dd_halt = -abs(limits.daily_drawdown_halt_pct) / 100.0 * eq
+    today_pnl = _today_realised_pnl()
+    if today_pnl <= dd_halt:
+        return (
+            f"drawdown kill-switch: today P&L ${today_pnl:,.0f} ≤ "
+            f"−{limits.daily_drawdown_halt_pct:.0f}% equity (${dd_halt:,.0f})",
+            "drawdown_halt",
+        )
+    # 2. Max concurrent positions
+    if ps.n_open >= limits.max_concurrent_positions:
+        return (
+            f"max concurrent positions reached ({ps.n_open}/{limits.max_concurrent_positions})",
+            "max_concurrent",
+        )
+    # 3. Max positions per asset
+    if asset["count"] >= limits.max_positions_per_asset:
+        return (
+            f"max positions on {instrument_label} reached "
+            f"({asset['count']}/{limits.max_positions_per_asset})",
+            "max_per_asset",
+        )
+    # 4. Same-direction crowding in the cluster
+    same_dir_count = cluster["long"] if d == "LONG" else cluster["short"]
+    if same_dir_count >= limits.max_same_dir_per_cluster:
+        return (
+            f"too many {d} positions in {cl} cluster "
+            f"({same_dir_count}/{limits.max_same_dir_per_cluster}) — correlated stacking",
+            "cluster_same_dir",
+        )
+    return None
+
+
+def capacity_precheck(
+    *,
+    direction: str,
+    instrument_id: int,
+    instrument_label: str,
+    equity: float,
+) -> RiskDecision:
+    """Amount-independent capacity check — answers "could ANY size open here?".
+
+    Used BEFORE cash-freeing: trimming live positions to fund a trade that the
+    hard caps (concurrent count / per-asset / cluster crowding / drawdown halt)
+    would block regardless of size just pays spread for nothing.  Fail-open."""
+    limits = load_limits()
+    if not limits.enabled:
+        return RiskDecision(True, 1.0, "risk manager disabled")
+    try:
+        if equity <= 0:
+            return RiskDecision(True, 1.0, "equity unknown — precheck passes")
+        d = _norm_dir(direction)
+        ps = portfolio_state(equity)
+        cl = _cluster_of(instrument_label)
+        cluster = ps.by_cluster.get(cl, {"gross": 0.0, "net": 0.0, "long": 0, "short": 0, "count": 0})
+        asset = ps.by_asset.get(instrument_id, {"gross": 0.0, "net": 0.0, "count": 0, "long": 0, "short": 0})
+        blk = _capacity_block(d, ps, cluster, asset, limits, equity, instrument_label, cl)
+        if blk:
+            return RiskDecision(False, 0.0, blk[0], capped_by=blk[1])
+        return RiskDecision(True, 1.0, "capacity ok")
+    except Exception as exc:
+        log.warning("risk_manager: capacity_precheck failed (fail-open): %s", exc)
+        return RiskDecision(True, 1.0, "precheck error — fail open")
+
+
 # ── The gate ──────────────────────────────────────────────────────────────────
 def check_new_trade(
     *,
@@ -286,40 +368,10 @@ def check_new_trade(
         signed = amount if d == "LONG" else -amount
 
         # ── Hard BLOCKS (cannot be fixed by shrinking) ────────────────────────
-        # 1. Drawdown kill-switch
-        dd_halt = -abs(limits.daily_drawdown_halt_pct) / 100.0 * eq
-        today_pnl = _today_realised_pnl()
-        if today_pnl <= dd_halt:
-            return RiskDecision(
-                False, 0.0,
-                f"drawdown kill-switch: today P&L ${today_pnl:,.0f} ≤ "
-                f"−{limits.daily_drawdown_halt_pct:.0f}% equity (${dd_halt:,.0f})",
-                capped_by="drawdown_halt",
-            )
-        # 2. Max concurrent positions
-        if ps.n_open >= limits.max_concurrent_positions:
-            return RiskDecision(
-                False, 0.0,
-                f"max concurrent positions reached ({ps.n_open}/{limits.max_concurrent_positions})",
-                capped_by="max_concurrent",
-            )
-        # 3. Max positions per asset
-        if asset["count"] >= limits.max_positions_per_asset:
-            return RiskDecision(
-                False, 0.0,
-                f"max positions on {instrument_label} reached "
-                f"({asset['count']}/{limits.max_positions_per_asset})",
-                capped_by="max_per_asset",
-            )
-        # 4. Same-direction crowding in the cluster
-        same_dir_count = cluster["long"] if d == "LONG" else cluster["short"]
-        if same_dir_count >= limits.max_same_dir_per_cluster:
-            return RiskDecision(
-                False, 0.0,
-                f"too many {d} positions in {cl} cluster "
-                f"({same_dir_count}/{limits.max_same_dir_per_cluster}) — correlated stacking",
-                capped_by="cluster_same_dir",
-            )
+        # 1–4 are amount-independent and shared with capacity_precheck().
+        blk = _capacity_block(d, ps, cluster, asset, limits, eq, instrument_label, cl)
+        if blk:
+            return RiskDecision(False, 0.0, blk[0], capped_by=blk[1])
         # 5. Anti-internal-hedge: don't open opposite a larger same-asset net
         if limits.block_internal_hedge and asset["net"] != 0:
             opposes = (d == "LONG" and asset["net"] < 0) or (d == "SHORT" and asset["net"] > 0)

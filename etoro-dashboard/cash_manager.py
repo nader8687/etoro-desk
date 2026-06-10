@@ -41,6 +41,21 @@ MAX_TRIM_FRACTION    = 0.75   # never shave more than this off one position
 KEEP_MIN_USD         = 200.0  # don't leave a trimmed position smaller than this
 OVERSTAY_REF         = 1.0    # overstay = age / avg_hold; >1 means past the average
 
+
+def _cfg():
+    """Settings-tab values (ultimate truth); module constants are fallback only."""
+    try:
+        import user_settings
+        return user_settings.cash_freeing_settings()
+    except Exception:
+        return None
+
+
+def min_edge_to_free() -> float:
+    s = _cfg()
+    return float(s.min_edge_to_free) if s else MIN_EDGE_TO_FREE
+
+
 _cooldown_lock = threading.Lock()
 _last_trim_at: dict[str, float] = {}   # str(position_id) -> monotonic ts
 
@@ -127,10 +142,18 @@ def try_free_cash(
     Returns {"freed": float, "actions": [str], "reason": str}.  freed=0 means
     nothing was trimmed (signal too weak, or no position weak enough to displace).
     """
+    s = _cfg()
+    edge_floor   = float(s.min_edge_to_free) if s else MIN_EDGE_TO_FREE
+    edge_margin  = float(s.edge_margin) if s else EDGE_MARGIN
+    cooldown_sec = float(s.trim_cooldown_sec) if s else TRIM_COOLDOWN_SEC
+    min_age_sec  = float(s.min_position_age_sec) if s else MIN_POSITION_AGE_SEC
+    max_fraction = float(s.max_trim_fraction) if s else MAX_TRIM_FRACTION
+    keep_min     = float(s.keep_min_usd) if s else KEEP_MIN_USD
+
     new_edge = signal_edge(new_strategy, new_confidence)
-    if new_edge < MIN_EDGE_TO_FREE:
+    if new_edge < edge_floor:
         return {"freed": 0.0, "actions": [],
-                "reason": f"signal edge {new_edge:.2f} < {MIN_EDGE_TO_FREE:.2f} floor"}
+                "reason": f"signal edge {new_edge:.2f} < {edge_floor:.2f} floor"}
 
     import positions_cache, position_sizer, trade_manager
 
@@ -142,15 +165,15 @@ def try_free_cash(
         if freed >= needed_usd:
             break
         # Edge gate — never trim a position the new signal doesn't clearly beat.
-        if new_edge <= c["fwd_edge"] + EDGE_MARGIN:
+        if new_edge <= c["fwd_edge"] + edge_margin:
             continue
         # Don't churn a fresh position.
-        if c["age_min"] * 60.0 < MIN_POSITION_AGE_SEC:
+        if c["age_min"] * 60.0 < min_age_sec:
             continue
-        # Plan the shave: enough for the remaining need, bounded by MAX_TRIM_FRACTION
-        # and by leaving at least KEEP_MIN_USD in the position.
+        # Plan the shave: enough for the remaining need, bounded by the max
+        # trim fraction and by leaving at least keep_min in the position.
         remaining = needed_usd - freed
-        max_free_here = min(c["amount"] * MAX_TRIM_FRACTION, max(0.0, c["amount"] - KEEP_MIN_USD))
+        max_free_here = min(c["amount"] * max_fraction, max(0.0, c["amount"] - keep_min))
         if max_free_here < 1.0:
             continue
         free_here = min(remaining, max_free_here)
@@ -162,7 +185,7 @@ def try_free_cash(
         # thread can't trim the same position at the same instant.
         pid_s = str(c["pid"])
         with _cooldown_lock:
-            if time.monotonic() - _last_trim_at.get(pid_s, 0.0) < TRIM_COOLDOWN_SEC:
+            if time.monotonic() - _last_trim_at.get(pid_s, 0.0) < cooldown_sec:
                 continue
             _last_trim_at[pid_s] = time.monotonic()
         try:
