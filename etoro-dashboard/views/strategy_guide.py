@@ -847,9 +847,12 @@ def render() -> None:
         "Strategy", display_labels,
         label_visibility="collapsed",
         help="Choose a strategy to explore",
+        key="guide_strategy_label",
     )
     key = meta_order[display_labels.index(chosen_label)]
     meta = STRATEGY_META[key]
+    # The Backtest section at the bottom of this page follows this selection.
+    st.session_state["guide_strategy_key"] = key
 
     st.divider()
 

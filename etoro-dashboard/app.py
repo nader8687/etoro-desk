@@ -1832,12 +1832,7 @@ def render_etoro_positions_panel(
             row = {"Instrument": _instrument_label(p), **row}
         rows.append(row)
 
-    st.dataframe(
-        pd.DataFrame(rows),
-        width="stretch",
-        hide_index=True,
-        height=min(42 + n * 35, 520),
-    )
+    _render_table(pd.DataFrame(rows))
 
 
 def _enrich_position_for_display(
@@ -5311,6 +5306,11 @@ with _nav_body.container():
     elif page == "Strategies":
         from views.strategy_guide import render as _render_strategy_guide
         _render_strategy_guide()
+        # Backtest lives at the end of the guide: read what a strategy does,
+        # then immediately replay it over real history with the live settings.
+        st.markdown("---")
+        from views.backtest import render as _render_backtest
+        _render_backtest()
 
 
     # ══════════════════════════════════════════════════════════════════════════════
@@ -5330,37 +5330,82 @@ with _nav_body.container():
         st.subheader("Watchlists")
         st.caption("Saved instrument lists from your eToro account")
 
-        if st.button("Load watchlists", type="primary"):
+        if st.button("Load watchlists", type="primary", key="wl_fetch_btn"):
+            st.session_state["_wl_fetch_pending"] = True
+            st.rerun()
+
+        if st.session_state.pop("_wl_fetch_pending", False):
             with st.spinner("Loading watchlists…"):
                 try:
-                    wl_data    = client.get_watchlists()
+                    wl_data = client.get_watchlists()
                     watchlists = extract_list(wl_data, "watchlists", "data", "Watchlists")
-
-                    if not watchlists:
-                        st.info("No watchlists found.")
-                        with st.expander("Raw response"):
-                            st.json(wl_data)
-                    else:
-                        df_wl    = pd.json_normalize(watchlists)
-                        id_col   = next((c for c in df_wl.columns if c.lower().endswith("id")), df_wl.columns[0])
-                        name_col = next((c for c in df_wl.columns if "name" in c.lower()), id_col)
-
-                        st.dataframe(df_wl, width="stretch")
-
-                        wl_opts = {str(row[name_col]): str(row[id_col]) for _, row in df_wl.iterrows()}
-                        chosen  = st.selectbox("Open watchlist", list(wl_opts.keys()))
-
-                        if st.button("Load contents"):
-                            detail = client.get_watchlist(wl_opts[chosen])
-                            insts  = extract_list(detail, "instruments","items","data","Instruments")
-                            if insts:
-                                st.dataframe(pd.json_normalize(insts), width="stretch")
-                            else:
-                                st.json(detail)
+                    st.session_state["_wl_cache"] = {
+                        "raw": wl_data,
+                        "watchlists": watchlists,
+                    }
+                    st.session_state.pop("_wl_contents", None)
                 except PermissionError:
-                    permission_error("Watchlists")
+                    st.session_state["_wl_cache"] = {"error": "permission"}
                 except Exception as exc:
-                    st.error(f"Watchlists error: {exc}")
+                    st.session_state["_wl_cache"] = {"error": str(exc)}
+            st.rerun()
+
+        _wl = st.session_state.get("_wl_cache")
+        if _wl:
+            if _wl.get("error") == "permission":
+                permission_error("Watchlists")
+            elif _wl.get("error"):
+                st.error(f"Watchlists error: {_wl['error']}")
+            elif not _wl.get("watchlists"):
+                st.info("No watchlists found.")
+                with st.expander("Raw response"):
+                    st.json(_wl.get("raw"))
+            else:
+                df_wl = pd.json_normalize(_wl["watchlists"])
+                id_col = next(
+                    (c for c in df_wl.columns if c.lower().endswith("id")),
+                    df_wl.columns[0],
+                )
+                name_col = next(
+                    (c for c in df_wl.columns if "name" in c.lower()), id_col,
+                )
+                _render_table(df_wl)
+
+                wl_opts = {
+                    str(row[name_col]): str(row[id_col]) for _, row in df_wl.iterrows()
+                }
+                chosen = st.selectbox("Open watchlist", list(wl_opts.keys()), key="wl_pick")
+
+                if st.button("Load contents", key="wl_contents_btn"):
+                    st.session_state["_wl_contents_pending"] = (
+                        wl_opts.get(chosen), chosen,
+                    )
+                    st.rerun()
+
+                _pending = st.session_state.pop("_wl_contents_pending", None)
+                if _pending:
+                    wl_id, wl_name = _pending
+                    with st.spinner(f"Loading {wl_name}…"):
+                        try:
+                            detail = client.get_watchlist(wl_id)
+                            insts = extract_list(
+                                detail, "instruments", "items", "data", "Instruments",
+                            )
+                            st.session_state["_wl_contents"] = {
+                                "detail": detail, "insts": insts,
+                            }
+                        except Exception as exc:
+                            st.session_state["_wl_contents"] = {"error": str(exc)}
+                    st.rerun()
+
+                _contents = st.session_state.get("_wl_contents")
+                if _contents:
+                    if _contents.get("error"):
+                        st.error(f"Watchlist contents error: {_contents['error']}")
+                    elif _contents.get("insts"):
+                        _render_table(pd.json_normalize(_contents["insts"]))
+                    else:
+                        st.json(_contents.get("detail"))
 
     # ══════════════════════════════════════════════════════════════════════════════
     # Logs

@@ -66,6 +66,7 @@ class BTResult:
     spread_pct: float
     trades: list = field(default_factory=list)
     equity_curve: list = field(default_factory=list)   # cumulative $ after each closed trade
+    regime_skipped: int = 0   # signals suppressed by the live regime filter
 
     # ── metrics ──────────────────────────────────────────────────────────────
     def _pnls(self, trades=None):
@@ -136,11 +137,32 @@ def run_backtest(
     *,
     amount: float = 1000.0,
     spread_pct: float = 0.05,
+    apply_regime_filter: bool = True,
+    apply_exits: bool = True,
+    window_bars: int = 0,
     progress_cb=None,
 ) -> Optional[BTResult]:
-    """Replay one strategy over one candle DataFrame.  None if not runnable."""
+    """Replay one strategy over one candle DataFrame.  None if not runnable.
+
+    apply_exits=False runs the NAKED strategy: entries on signal, exits ONLY on
+    a strategy reversal (or end of data) — no stop, no trail, no take-profit.
+    Comparing the two runs shows exactly what the exit/risk layer contributes.
+
+    window_bars: the live bot's candle_count — every signal is computed on a
+    ROLLING window of exactly this many candles (like the live hub), not on a
+    growing one.  0 = legacy growing-window behaviour."""
     import strategies
     import exit_profiles
+    import regime as regime_mod
+
+    # Mirror the live engine: the regime entry-gate runs only when it's enabled
+    # in Settings → Behavior (same flag the bots honour).
+    if apply_regime_filter:
+        try:
+            import user_settings
+            apply_regime_filter = bool(user_settings.behavior_settings().regime_filter_enabled)
+        except Exception:
+            pass
 
     try:
         strat = strategies.get(strategy_key)
@@ -177,6 +199,13 @@ def run_backtest(
         interval_secs=interval_secs, n_bars=n, amount=amount, spread_pct=spread_pct,
     )
 
+    # Mirror the live bot's view: signals start once a FULL live-sized window
+    # exists and always see exactly window_bars candles.
+    win = int(window_bars) if window_bars and window_bars > 0 else 0
+    start_bar = max(WARMUP_BARS, win) if win else WARMUP_BARS
+    if n < start_bar + 10:
+        return None
+
     in_pos = False
     direction = ""
     entry_fill = 0.0
@@ -209,7 +238,7 @@ def run_backtest(
         result.equity_curve.append(round(equity, 4))
         in_pos = False
 
-    for i in range(WARMUP_BARS, n):
+    for i in range(start_bar, n):
         if progress_cb and i % 100 == 0:
             progress_cb(i / n)
 
@@ -238,7 +267,7 @@ def run_backtest(
                 in_pos = True
 
         # ── 2. Manage an open position against THIS bar ──────────────────────
-        if in_pos:
+        if in_pos and apply_exits:
             lo, hi = lows[i], highs[i]
             closed_this_bar = False
             # Conservative ordering: stop → trail → TP, tested on PRIOR levels.
@@ -267,8 +296,8 @@ def run_backtest(
                     peak = min(peak, lo)
                     trail_level = min(trail_level, peak * (1.0 + trail_mult * atr_px))
 
-        # ── 3. Signal on THIS closed bar (window = bars 0..i, like live) ─────
-        window = df.iloc[: i + 1]
+        # ── 3. Signal on THIS closed bar — rolling live-sized window ─────────
+        window = df.iloc[max(0, i + 1 - win) if win else 0 : i + 1]
         c = closes[i]
         ask = c * (1.0 + half_spread)
         bid = c * (1.0 - half_spread)
@@ -283,11 +312,266 @@ def run_backtest(
             if (direction == "LONG" and s == "SELL") or (direction == "SHORT" and s == "BUY"):
                 _close(i, c, "reversal")
         elif s in ("BUY", "SELL") and pending_signal is None:
-            pending_signal = ("LONG" if s == "BUY" else "SHORT",
-                              int(getattr(sig, "confidence", 0) or 0))
+            allowed = True
+            if apply_regime_filter:
+                # Same gate the live engine applies before an entry: silence
+                # strategy families that are in the wrong trend/vol regime.
+                try:
+                    rs = regime_mod.classify(window)
+                    allowed, _why = regime_mod.allows(strategy_key, rs)
+                except Exception:
+                    allowed = True
+            if allowed:
+                pending_signal = ("LONG" if s == "BUY" else "SHORT",
+                                  int(getattr(sig, "confidence", 0) or 0))
+            else:
+                result.regime_skipped += 1
 
     if in_pos:
         _close(n - 1, closes[n - 1], "end_of_data")
     if progress_cb:
         progress_cb(1.0)
     return result
+
+
+# ── Exit-parameter optimisation (robustness sweep) ────────────────────────────
+# Signals are INDEPENDENT of exit parameters, so the expensive part (running the
+# strategy on every bar) is computed once; each parameter combo then replays the
+# cheap position/exit logic over the cached series.  Guardrails against
+# curve-fitting live in the CALLER: rank by OUT-OF-SAMPLE stats, require minimum
+# trade counts, and show the whole surface (plateau ≫ peak).
+
+def compute_signal_series(
+    df: pd.DataFrame,
+    strategy_key: str,
+    instrument_id: int,
+    spread_pct: float,
+    *,
+    apply_regime_filter: bool = True,
+    window_bars: int = 0,
+    progress_cb=None,
+) -> Optional[list]:
+    """Per-bar (signal, confidence, regime_ok) — exit-agnostic.
+
+    window_bars mirrors the live bot's candle_count: each bar's signal is
+    computed on a rolling window of exactly that many candles."""
+    import strategies
+    import regime as regime_mod
+    try:
+        strat = strategies.get(strategy_key)
+    except Exception:
+        return None
+    if strat is None or getattr(strat, "is_async", False):
+        return None
+    df = df.reset_index(drop=True)
+    n = len(df)
+    win = int(window_bars) if window_bars and window_bars > 0 else 0
+    start_bar = max(WARMUP_BARS, win) if win else WARMUP_BARS
+    if n < start_bar + 10:
+        return None
+    closes = df["Close"].astype(float).tolist()
+    half_spread = spread_pct / 100.0 / 2.0
+    out: list = [("", 0, True)] * n
+    for i in range(start_bar, n):
+        if progress_cb and i % 100 == 0:
+            progress_cb(i / n)
+        window = df.iloc[max(0, i + 1 - win) if win else 0 : i + 1]
+        c = closes[i]
+        try:
+            sig = strat.generate(window, c * (1 + half_spread), c * (1 - half_spread), instrument_id)
+        except Exception:
+            sig = None
+        s = (getattr(sig, "signal", "") or "").upper() if sig else ""
+        conf = int(getattr(sig, "confidence", 0) or 0) if sig else 0
+        ok = True
+        if apply_regime_filter and s in ("BUY", "SELL"):
+            try:
+                rs = regime_mod.classify(window)
+                ok, _ = regime_mod.allows(strategy_key, rs)
+            except Exception:
+                ok = True
+        out[i] = (s, conf, ok)
+    if progress_cb:
+        progress_cb(1.0)
+    return out
+
+
+def simulate_exits(
+    df: pd.DataFrame,
+    signals: list,
+    strategy_key: str,
+    instrument_label: str,
+    interval_secs: int,
+    *,
+    stop_mult: float,
+    trail_mult: float,
+    tp_pct: float,
+    amount: float = 1000.0,
+    spread_pct: float = 0.05,
+    window_bars: int = 0,
+) -> BTResult:
+    """Replay position/exit logic over a cached signal series with EXPLICIT exit
+    parameters.  Mirrors run_backtest's mechanics exactly (same fills, same
+    conservative intrabar ordering, same chandelier ratchet) — drift between the
+    two is checked in tests by running identical parameters through both."""
+    import exit_profiles
+
+    df = df.reset_index(drop=True)
+    n = len(df)
+    opens  = df["Open"].astype(float).tolist()
+    highs  = df["High"].astype(float).tolist()
+    lows   = df["Low"].astype(float).tolist()
+    closes = df["Close"].astype(float).tolist()
+    times  = df["time"].tolist()
+    atrp   = _atr_pct_series(df).tolist()
+    half_spread = spread_pct / 100.0 / 2.0
+
+    floor = exit_profiles.stop_loss_min_pct(strategy_key, instrument_label)
+    s_cfg = exit_profiles._atr_user()
+    noise = float(s_cfg.noise_floor_pct) if s_cfg is not None else exit_profiles.ATR_STOP_NOISE_FLOOR_PCT
+    widen = float(s_cfg.widen_max) if s_cfg is not None else exit_profiles.STOP_WIDEN_MAX
+
+    result = BTResult(
+        strategy=strategy_key, instrument_label=instrument_label,
+        interval_secs=interval_secs, n_bars=n, amount=amount, spread_pct=spread_pct,
+    )
+    in_pos = False
+    direction, entry_fill, entry_idx, entry_conf = "", 0.0, 0, 0
+    stop_level = tp_level = trail_level = peak = 0.0
+    pending = None
+    equity = 0.0
+
+    def _close(i, raw_px, reason):
+        nonlocal in_pos, equity
+        if direction == "LONG":
+            exit_fill = raw_px * (1.0 - half_spread)
+            move = (exit_fill - entry_fill) / entry_fill
+        else:
+            exit_fill = raw_px * (1.0 + half_spread)
+            move = (entry_fill - exit_fill) / entry_fill
+        pnl = amount * move
+        equity += pnl
+        result.trades.append(BTTrade(
+            direction=direction, entry_idx=entry_idx, exit_idx=i,
+            entry_time=times[entry_idx], exit_time=times[i],
+            entry_price=round(entry_fill, 6), exit_price=round(exit_fill, 6),
+            pnl_dollars=round(pnl, 4), pnl_pct=round(move * 100.0, 4),
+            reason=reason, confidence=entry_conf,
+        ))
+        result.equity_curve.append(round(equity, 4))
+        in_pos = False
+
+    _win = int(window_bars) if window_bars and window_bars > 0 else 0
+    _start = max(WARMUP_BARS, _win) if _win else WARMUP_BARS
+    for i in range(_start, n):
+        if pending is not None and not in_pos:
+            d, conf = pending
+            pending = None
+            raw = opens[i]
+            if raw > 0 and atrp[i - 1] > 0:
+                direction, entry_conf, entry_idx = d, conf, i
+                entry_fill = raw * (1.0 + half_spread) if d == "LONG" else raw * (1.0 - half_spread)
+                stop_pct = min(max(stop_mult * atrp[i - 1], noise), floor * widen)
+                if d == "LONG":
+                    stop_level = entry_fill * (1.0 - stop_pct / 100.0)
+                    tp_level = entry_fill * (1.0 + tp_pct / 100.0) if tp_pct > 0 else 0.0
+                else:
+                    stop_level = entry_fill * (1.0 + stop_pct / 100.0)
+                    tp_level = entry_fill * (1.0 - tp_pct / 100.0) if tp_pct > 0 else 0.0
+                peak, trail_level, in_pos = entry_fill, stop_level, True
+
+        if in_pos:
+            lo, hi = lows[i], highs[i]
+            closed_bar = False
+            if direction == "LONG":
+                if lo <= stop_level:
+                    _close(i, stop_level, "stop_loss"); closed_bar = True
+                elif trail_mult > 0 and lo <= trail_level:
+                    _close(i, trail_level, "trailing_stop"); closed_bar = True
+                elif tp_level > 0 and hi >= tp_level:
+                    _close(i, tp_level, "take_profit"); closed_bar = True
+            else:
+                if hi >= stop_level:
+                    _close(i, stop_level, "stop_loss"); closed_bar = True
+                elif trail_mult > 0 and hi >= trail_level:
+                    _close(i, trail_level, "trailing_stop"); closed_bar = True
+                elif tp_level > 0 and lo <= tp_level:
+                    _close(i, tp_level, "take_profit"); closed_bar = True
+            if in_pos and not closed_bar and atrp[i] > 0 and trail_mult > 0:
+                atr_px = atrp[i] / 100.0
+                if direction == "LONG":
+                    peak = max(peak, hi)
+                    trail_level = max(trail_level, peak * (1.0 - trail_mult * atr_px))
+                else:
+                    peak = min(peak, lo)
+                    trail_level = min(trail_level, peak * (1.0 + trail_mult * atr_px))
+
+        s, conf, ok = signals[i]
+        if in_pos:
+            if (direction == "LONG" and s == "SELL") or (direction == "SHORT" and s == "BUY"):
+                _close(i, closes[i], "reversal")
+        elif s in ("BUY", "SELL") and pending is None:
+            if ok:
+                pending = ("LONG" if s == "BUY" else "SHORT", conf)
+            else:
+                result.regime_skipped += 1
+
+    if in_pos:
+        _close(n - 1, closes[n - 1], "end_of_data")
+    return result
+
+
+def optimize_exits(
+    df: pd.DataFrame,
+    strategy_key: str,
+    instrument_label: str,
+    instrument_id: int,
+    interval_secs: int,
+    *,
+    amount: float = 1000.0,
+    spread_pct: float = 0.05,
+    stop_mults=(1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0),
+    trail_mults=(1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0),
+    tp_pcts=(0.0, 0.6, 1.2, 2.0),
+    min_is_trades: int = 8,
+    window_bars: int = 0,
+    progress_cb=None,
+) -> Optional[dict]:
+    """Sweep the exit grid over ONE cached signal series.
+
+    Returns {"rows": [...], "signals_n": int} where each row carries the params
+    plus IN-SAMPLE (first 70%) and OUT-OF-SAMPLE (last 30%) summaries.  Rows
+    with fewer than min_is_trades in-sample trades are marked excluded — too
+    little evidence to mean anything."""
+    signals = compute_signal_series(
+        df, strategy_key, instrument_id, spread_pct,
+        window_bars=window_bars,
+        progress_cb=(lambda f: progress_cb(f * 0.5)) if progress_cb else None,
+    )
+    if signals is None:
+        return None
+    combos = [(sm, tm, tp) for sm in stop_mults for tm in trail_mults for tp in tp_pcts]
+    rows = []
+    for c_i, (sm, tm, tp) in enumerate(combos):
+        if progress_cb and c_i % 10 == 0:
+            progress_cb(0.5 + 0.5 * c_i / len(combos))
+        res = simulate_exits(
+            df, signals, strategy_key, instrument_label, interval_secs,
+            stop_mult=sm, trail_mult=tm, tp_pct=tp,
+            amount=amount, spread_pct=spread_pct, window_bars=window_bars,
+        )
+        ins, oos = res.oos_split()
+        rows.append({
+            "stop_mult": sm, "trail_mult": tm, "tp_pct": tp,
+            "is": ins, "oos": oos,
+            "excluded": ins["n"] < min_is_trades,
+        })
+    if progress_cb:
+        progress_cb(1.0)
+    return {
+        "rows": rows,
+        "signals_n": sum(1 for s, _, _ in signals if s in ("BUY", "SELL")),
+        # Cached series so the caller can instantly replay ANY combo in full
+        # (e.g. to chart the best parameters' trades) without recomputing.
+        "signals": signals,
+    }

@@ -372,6 +372,19 @@ def inject_css() -> None:
         border-radius: 8px;
         padding: 6px 8px;
         margin-bottom: 12px;
+        overflow: visible !important;
+    }}
+    /* The control is a single flex row that CLIPS overflowing items by default —
+       with 12 nav entries the row can overflow and tabs silently disappear.
+       Let it wrap onto extra lines so every page is always reachable. */
+    [data-testid="stSegmentedControl"] > div,
+    [data-testid="stSegmentedControl"] [role="radiogroup"],
+    [data-testid="stSegmentedControl"] [data-baseweb="button-group"] {{
+        flex-wrap: wrap !important;
+        row-gap: 4px !important;
+        overflow: visible !important;
+        height: auto !important;
+        max-height: none !important;
     }}
     [data-testid="stSegmentedControl"] button {{
         font-weight: 600 !important;

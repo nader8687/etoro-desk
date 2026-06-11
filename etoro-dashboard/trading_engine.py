@@ -1781,6 +1781,16 @@ def stop_all() -> None:
     log.info("All engines stopped")
 
 
+def configured_instruments() -> dict[str, int]:
+    """label → instrument_id for every registered engine (Backtest page)."""
+    with _lock:
+        return {
+            s.config.instrument_label: s.config.instrument_id
+            for s in _engines.values()
+            if s.config.instrument_id and s.config.instrument_label
+        }
+
+
 def _resolve_bot_key(instrument_id: int, bot_id: Optional[str] = None) -> Optional[str]:
     """Return the engine key to use: explicit bot_id wins, else primary for iid."""
     if bot_id is not None:
