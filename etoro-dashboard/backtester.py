@@ -411,6 +411,7 @@ def simulate_exits(
     amount: float = 1000.0,
     spread_pct: float = 0.05,
     window_bars: int = 0,
+    trail_arm: str = "entry",
 ) -> BTResult:
     """Replay position/exit logic over a cached signal series with EXPLICIT exit
     parameters.  Mirrors run_backtest's mechanics exactly (same fills, same
@@ -485,17 +486,27 @@ def simulate_exits(
         if in_pos:
             lo, hi = lows[i], highs[i]
             closed_bar = False
+            # trail_arm="breakeven": the chandelier level ratchets as usual but
+            # may only FIRE once it has locked in at least breakeven — the hard
+            # stop owns the entire below-entry region.  Kills losing-trail churn
+            # (measured: 86% of losing trail closes recovered to entry within 8h)
+            # at the cost of riding the hard stop on trades that peak sub-entry.
+            _trail_live = trail_mult > 0 and (
+                trail_arm != "breakeven"
+                or (direction == "LONG" and trail_level >= entry_fill)
+                or (direction == "SHORT" and trail_level <= entry_fill)
+            )
             if direction == "LONG":
                 if lo <= stop_level:
                     _close(i, stop_level, "stop_loss"); closed_bar = True
-                elif trail_mult > 0 and lo <= trail_level:
+                elif _trail_live and lo <= trail_level:
                     _close(i, trail_level, "trailing_stop"); closed_bar = True
                 elif tp_level > 0 and hi >= tp_level:
                     _close(i, tp_level, "take_profit"); closed_bar = True
             else:
                 if hi >= stop_level:
                     _close(i, stop_level, "stop_loss"); closed_bar = True
-                elif trail_mult > 0 and hi >= trail_level:
+                elif _trail_live and hi >= trail_level:
                     _close(i, trail_level, "trailing_stop"); closed_bar = True
                 elif tp_level > 0 and lo <= tp_level:
                     _close(i, tp_level, "take_profit"); closed_bar = True
