@@ -70,6 +70,7 @@ PROFILES: dict[str, ExitProfile] = {
     "ichimoku":          TREND,
     "donchian":          TREND,
     "orb":               TREND,
+    "daviddtech":        TREND,   # NNFX stack — baseline-gated trend rider
     # Mean-reverting / oscillator — bank the bounce with a hard take-profit
     "rsi":               MEAN_REVERT,
     "stoch_rsi":         MEAN_REVERT,
@@ -246,9 +247,34 @@ def _atr_user():
         return None
 
 
-def atr_mult(strategy_key: str) -> float:
-    """Entry-stop ATR multiple — Settings-tab value per behaviour class,
-    falling back to the env/golden-rule defaults."""
+def _bot_atr_overrides(bot_key: str) -> tuple[Optional[float], Optional[float]]:
+    """Per-bot (atr_stop_mult, atr_trail_mult) from Settings bot_overrides.
+
+    Written by the fleet-optimization apply step and editable in the Settings
+    per-bot table — per-bot beats the class-level AtrSettings value.  Fail-open:
+    any settings hiccup returns (None, None) so stops always have a value."""
+    if not bot_key:
+        return None, None
+    try:
+        import user_settings
+        raw = user_settings.load().get("bot_overrides", {}).get(bot_key, {})
+        if not isinstance(raw, dict):
+            return None, None
+        s, t = raw.get("atr_stop_mult"), raw.get("atr_trail_mult")
+        return (
+            float(s) if s is not None else None,
+            float(t) if t is not None else None,
+        )
+    except Exception:
+        return None, None
+
+
+def atr_mult(strategy_key: str, bot_key: str = "") -> float:
+    """Entry-stop ATR multiple — per-bot Settings override first, then the
+    Settings-tab value per behaviour class, then env/golden-rule defaults."""
+    bot_stop, _ = _bot_atr_overrides(bot_key)
+    if bot_stop is not None and bot_stop > 0:
+        return bot_stop
     kind = profile(strategy_key).kind
     s = _atr_user()
     if s is not None:
@@ -261,9 +287,13 @@ def atr_mult(strategy_key: str) -> float:
     return ATR_MULT_BY_KIND.get(kind, GOLDEN_ATR_MULT)
 
 
-def atr_trail_mult(strategy_key: str) -> float:
-    """ATR multiple for the CHANDELIER trailing stop — golden rule 2.0x,
-    editable on the Settings tab (env ATR_TRAIL_MULT as fallback)."""
+def atr_trail_mult(strategy_key: str, bot_key: str = "") -> float:
+    """ATR multiple for the CHANDELIER trailing stop — per-bot Settings
+    override first, then the Settings-tab class value (golden rule 2.0x),
+    then env ATR_TRAIL_MULT."""
+    _, bot_trail = _bot_atr_overrides(bot_key)
+    if bot_trail is not None and bot_trail > 0:
+        return bot_trail
     s = _atr_user()
     if s is not None:
         return float(s.trail_mult)
@@ -282,6 +312,7 @@ def adaptive_stop_pct(
     strategy_key: str,
     instrument_label: str = "",
     atr_pct: Optional[float] = None,
+    bot_key: str = "",
 ) -> float:
     """Volatility-based stop distance (% of entry) — golden rule 2xATR.
 
@@ -295,7 +326,7 @@ def adaptive_stop_pct(
     floor = stop_loss_min_pct(strategy_key, instrument_label)
     if atr_pct is None or atr_pct <= 0:
         return floor
-    k = atr_mult(strategy_key)
+    k = atr_mult(strategy_key, bot_key)
     s = _atr_user()
     noise = float(s.noise_floor_pct) if s is not None else ATR_STOP_NOISE_FLOOR_PCT
     widen = float(s.widen_max) if s is not None else STOP_WIDEN_MAX

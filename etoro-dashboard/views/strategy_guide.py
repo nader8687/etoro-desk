@@ -296,6 +296,51 @@ STRATEGY_META: dict[str, dict] = {
         "best_for": "Strong trending markets. Excellent as a secondary filter alongside MACD or MA Crossover.",
     },
 
+    "daviddtech": {
+        "display_name": "DaviddTech Stack (SS·STC·CHOP)",
+        "category": "Trend-Following",
+        "icon": "🧱",
+        "tagline": "NNFX-style module stack: baseline gates direction, STC times the entry, choppiness vetoes ranges.",
+        "how_it_works": [
+            "Built on the **NNFX / DaviddTech method**: each indicator has exactly ONE job, "
+            "and an entry fires only when every module agrees on the same candle.",
+            "**Baseline — Ehlers 2-Pole Super Smoother (20)**: a low-lag IIR filter of close. "
+            "Price above it = longs only, below = shorts only.  It gates direction, it never times entries.",
+            "**Confirmation — Schaff Trend Cycle (23/50/10)**: a double-stochastic of MACD, 0–100. "
+            "The entry trigger is a cross OUT of an extreme zone: up through 25 = BUY timing, "
+            "down through 75 = SELL timing.",
+            "**Filter — Choppiness Index (14)**: `100·log10(ΣTR/range)/log10(14)`. "
+            "Above 61.8 the tape is ranging and ALL entries are vetoed; below 38.2 is a strong "
+            "trend and adds confidence.",
+            "**Exits are not this module's job** — the engine's ATR golden-rule stop and "
+            "chandelier trail (the NNFX 'ATR exit') manage the position, tunable per bot in Settings.",
+        ],
+        "signals": {
+            "BUY":  "Price above baseline + STC crossed up through 25 + CHOP < 61.8 — all modules aligned long.",
+            "SELL": "Price below baseline + STC crossed down through 75 + CHOP < 61.8 — all modules aligned short.",
+            "HOLD": "Any module disagrees — the reasoning names which one vetoed (baseline, STC, or CHOP).",
+        },
+        "parameters": [
+            ("Super Smoother", "20", "Ehlers 2-pole filter period — the direction baseline"),
+            ("STC", "23/50/10", "MACD fast/slow + stochastic cycle length"),
+            ("STC zones", "25 / 75", "Cross UP out of 25 = buy timing; DOWN out of 75 = sell timing"),
+            ("CHOP veto", "61.8", "Choppiness above this blocks all entries"),
+            ("CHOP strong", "38.2", "Below this = strong trend, boosts confidence"),
+        ],
+        "pros": [
+            "Three independent modules must agree — very few but high-conviction signals",
+            "The choppiness veto avoids the classic trend-follower death in ranging tape",
+            "Low-lag Ehlers baseline turns earlier than an EMA of the same length",
+        ],
+        "cons": [
+            "Selective by design — long quiet stretches between entries",
+            "Like all trend stacks it gives back profit on sharp V-reversals (the ATR trail mitigates)",
+            "Popularised with big claimed backtests but no published out-of-sample record — "
+            "trust only what OUR backtest page shows",
+        ],
+        "best_for": "Trending crypto/stock sessions on 15m–1h.  OOS-qualified here on XRP 30m, BTC 15m and TSLA 1h.",
+    },
+
     "ichimoku": {
         "display_name": "Ichimoku Cloud",
         "category": "Trend-Following",

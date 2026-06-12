@@ -1551,6 +1551,7 @@ def open_trade(
     client: Optional["EToroClient"] = None,
     demo_amount: float = 0,
     bot_id: str = "",
+    bot_key: str = "",
     strategy: str = "",
     exec_risk: str = "",
     net_edge_pct: float = 0.0,
@@ -1584,7 +1585,7 @@ def open_trade(
     import exit_profiles
     # Regime-aware stop: widen the fixed floor toward k×ATR% in volatile regimes.
     # Falls back to the fixed floor when atr_pct is None (unchanged behaviour).
-    stop_pct_used = exit_profiles.adaptive_stop_pct(strategy, instrument_label, atr_pct)
+    stop_pct_used = exit_profiles.adaptive_stop_pct(strategy, instrument_label, atr_pct, bot_key)
     stop_loss = compute_stop_loss_price(
         direction, entry_price, spread,
         min_pct=stop_pct_used,

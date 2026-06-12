@@ -17,6 +17,7 @@ from .stoch_rsi import StochRSIStrategy
 from .donchian import DonchianStrategy
 from .ichimoku import IchimokuStrategy
 from .adx import ADXStrategy
+from .daviddtech import DaviddTechStrategy
 
 # Ordered for the UI dropdown — LLM first, then alphabetical-ish by category
 _ALL: list[Strategy] = [
@@ -29,6 +30,7 @@ _ALL: list[Strategy] = [
     MACDStrategy(),
     ADXStrategy(),
     IchimokuStrategy(),
+    DaviddTechStrategy(),
 
     # ── Breakout ─────────────────────────────────────────────────────────────
     ORBStrategy(),

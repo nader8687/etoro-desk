@@ -32,7 +32,9 @@ caps prevent the fleet from piling the whole book into correlated crypto risk.
 """
 from __future__ import annotations
 
+import json
 import logging
+import os
 import threading
 import time
 try:
@@ -251,6 +253,44 @@ def _today_realised_pnl() -> float:
         return 0.0
 
 
+_EQUITY_ANCHOR_PATH = Path(os.environ.get("EQUITY_ANCHOR_PATH", "/app/data/equity_anchor.json"))
+_anchor_cache: Optional[dict] = None
+
+
+def _equity_anchor(current_equity: float) -> Optional[float]:
+    """Start-of-day (UTC) equity anchor, persisted across container restarts.
+
+    Rolls to `current_equity` the first time a new UTC day is seen.  The
+    drawdown halt compares LIVE equity against this anchor — ground truth
+    that includes slippage, fees, manual closes and unrealised swings, all
+    of which the tick-priced journal misses (it ran ~$0.8/trade optimistic
+    and once reported −$434 on a −$3.8k equity day).  Returns None when no
+    usable anchor exists (equity feed down) — callers then fall back to the
+    journal-based check rather than blocking on missing data."""
+    global _anchor_cache
+    if current_equity <= 0:
+        return None
+    today = datetime.now(timezone.utc).date().isoformat()
+    a = _anchor_cache
+    if a is None or a.get("date") != today:
+        try:
+            raw = json.loads(_EQUITY_ANCHOR_PATH.read_text(encoding="utf-8"))
+            a = raw if isinstance(raw, dict) else None
+        except Exception:
+            a = None
+    if not isinstance(a, dict) or a.get("date") != today or float(a.get("equity") or 0) <= 0:
+        a = {"date": today, "equity": float(current_equity)}
+        try:
+            tmp = _EQUITY_ANCHOR_PATH.with_suffix(".tmp")
+            tmp.write_text(json.dumps(a), encoding="utf-8")
+            tmp.replace(_EQUITY_ANCHOR_PATH)
+            log.info("Equity anchor rolled: %s @ $%.2f", today, current_equity)
+        except Exception:
+            pass
+    _anchor_cache = a
+    return float(a["equity"])
+
+
 def _capacity_block(
     d: str,
     ps: "PortfolioState",
@@ -264,15 +304,29 @@ def _capacity_block(
     """The AMOUNT-INDEPENDENT hard blocks, shared by check_new_trade and
     capacity_precheck so the two can never drift apart.  Returns
     (reason, capped_by) when blocked, else None."""
-    # 1. Drawdown kill-switch
-    dd_halt = -abs(limits.daily_drawdown_halt_pct) / 100.0 * eq
-    today_pnl = _today_realised_pnl()
-    if today_pnl <= dd_halt:
-        return (
-            f"drawdown kill-switch: today P&L ${today_pnl:,.0f} ≤ "
-            f"−{limits.daily_drawdown_halt_pct:.0f}% equity (${dd_halt:,.0f})",
-            "drawdown_halt",
-        )
+    # 1. Drawdown kill-switch — EQUITY ground truth first (sees slippage, fees,
+    #    manual closes and unrealised bleed), journal-realised P&L only as the
+    #    fallback when no live equity reading is available.
+    anchor = _equity_anchor(eq)
+    if anchor:
+        dd_halt = -abs(limits.daily_drawdown_halt_pct) / 100.0 * anchor
+        eq_dd = eq - anchor
+        if eq_dd <= dd_halt:
+            return (
+                f"drawdown kill-switch: equity ${eq_dd:,.0f} today ≤ "
+                f"−{limits.daily_drawdown_halt_pct:.0f}% of day-start equity "
+                f"(${dd_halt:,.0f})",
+                "drawdown_halt",
+            )
+    else:
+        dd_halt = -abs(limits.daily_drawdown_halt_pct) / 100.0 * eq
+        today_pnl = _today_realised_pnl()
+        if today_pnl <= dd_halt:
+            return (
+                f"drawdown kill-switch: today P&L ${today_pnl:,.0f} ≤ "
+                f"−{limits.daily_drawdown_halt_pct:.0f}% equity (${dd_halt:,.0f})",
+                "drawdown_halt",
+            )
     # 2. Max concurrent positions
     if ps.n_open >= limits.max_concurrent_positions:
         return (

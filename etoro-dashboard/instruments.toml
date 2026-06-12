@@ -992,3 +992,39 @@ demo_amount        = 5000.0
 enabled            = true
 auto_trade         = false
 strategy           = "candlestick"
+
+# ── DaviddTech NNFX stack — added 2026-06-12 after OOS qualification ──────────
+# (sweep: XRP 30m OOS PF 2.77 n13 · BTC 15m PF 2.18 n12 · TSLA 1h PF 4.44 n14)
+
+[instruments.xrp_daviddtech_30m]
+label              = "XRP  (XRP)"
+instrument_id      = 0
+interval           = "30 Minutes"
+interval_secs      = 1800
+candle_count       = 300
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = true
+strategy           = "daviddtech"
+
+[instruments.btc_daviddtech_15m]
+label              = "Bitcoin  (BTC)"
+instrument_id      = 0
+interval           = "15 Minutes"
+interval_secs      = 900
+candle_count       = 300
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = true
+strategy           = "daviddtech"
+
+[instruments.tsla_daviddtech_1h]
+label              = "Tesla Motors, Inc.  (TSLA)"
+instrument_id      = 0
+interval           = "1 Hour"
+interval_secs      = 3600
+candle_count       = 300
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = true
+strategy           = "daviddtech"

@@ -645,87 +645,90 @@ def render() -> None:
         st.info("Pick the parameters and hit **Run backtest**.")
     else:
         res, df = data["res"], data["df"]
-    s = res.summary()
-    ins, oos = res.oos_split()
-    _risk_tag = ("🛡️ exits & risk ON" if data.get("risk_on", True)
-                 else "⚠️ NAKED strategy — exits & risk OFF (reversal-only exits)")
-    st.markdown(
-        f"**{names.get(data['strategy'], data['strategy'])} · {data['label']} · "
-        f"{data['interval']}** — {res.n_bars} candles ({data['span']}) · {_risk_tag} · "
-        f"signal window **{data.get('window_bars', 0)} candles, same as the live bot**"
-    )
-
-    m1, m2, m3, m4, m5, m6 = st.columns(6)
-    m1.metric("Trades", s["n"])
-    m2.metric("P&L", f"${s['pnl']:+,.2f}")
-    m3.metric("Win rate", f"{s['win_rate']*100:.0f}%")
-    m4.metric("Profit factor", "∞" if s["pf"] == float("inf") else f"{s['pf']:.2f}")
-    m5.metric("Max drawdown", f"${s['max_dd']:,.2f}")
-    m6.metric("OOS PF (last 30%)", "∞" if oos["pf"] == float("inf") else f"{oos['pf']:.2f}",
-              help=f"{oos['n']} out-of-sample trades")
-    if res.regime_skipped:
-        st.caption(f"🧭 Regime filter suppressed {res.regime_skipped} signal(s) — "
-                   "same gate the live bots apply.")
-
-    # ── Price chart with every entry & exit ──────────────────────────────────
-    st.plotly_chart(_chart_with_trades(df, res.trades),
-                    use_container_width=True, key="bt_price_chart")
-    st.caption(_MARKER_CAPTION)
-
-    # ── Equity curve + breakdowns ─────────────────────────────────────────────
-    if res.trades:
-        eq = go.Figure(go.Scatter(x=[t.exit_time for t in res.trades], y=res.equity_curve,
-                                  mode="lines+markers", line=dict(width=2)))
-        eq.add_hline(y=0, line_dash="dot", line_width=1)
-        eq.update_layout(height=240, margin=dict(l=10, r=10, t=26, b=10),
-                         title="Cumulative P&L ($)",
-                         paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
-        st.plotly_chart(eq, use_container_width=True, key="bt_equity")
-
-        r1, r2 = st.columns(2)
-        with r1:
-            st.markdown("**By exit reason**")
-            br = res.by_reason()
-            _render_df_table(pd.DataFrame(
-                [{"Reason": k, "n": v["n"], "P&L $": v["pnl"]} for k, v in
-                 sorted(br.items(), key=lambda kv: kv[1]["pnl"])],
-            ))
-        with r2:
-            st.markdown("**In-sample vs out-of-sample**")
-            _render_df_table(pd.DataFrame([
-                {"Segment": "first 70%", "n": ins["n"], "P&L $": ins["pnl"],
-                 "PF": ins["pf"] if ins["pf"] != float("inf") else 99.0},
-                {"Segment": "last 30%", "n": oos["n"], "P&L $": oos["pnl"],
-                 "PF": oos["pf"] if oos["pf"] != float("inf") else 99.0},
-            ]))
-
-        with st.expander(f"All {len(res.trades)} trades"):
-            _render_df_table(pd.DataFrame([{
-                "Dir": t.direction, "Entry": t.entry_time, "Exit": t.exit_time,
-                "Entry px": t.entry_price, "Exit px": t.exit_price,
-                "P&L $": t.pnl_dollars, "P&L %": t.pnl_pct,
-                "Reason": t.reason, "Conf": t.confidence,
-            } for t in res.trades]))
-    else:
-        st.caption("No trades in this window (signals never fired, or the regime "
-                   "filter suppressed them all).")
-
-    with st.expander("How faithful is this to the live bots?"):
+        s = res.summary()
+        ins, oos = res.oos_split()
+        _risk_tag = ("🛡️ exits & risk ON" if data.get("risk_on", True)
+                     else "⚠️ NAKED strategy — exits & risk OFF (reversal-only exits)")
         st.markdown(
-            "**Identical to live:** the strategy signal code itself (same module the "
-            "bots call), signals computed on closed candles only **over the same "
-            "rolling window length the live bot uses (its candle_count)**, the regime "
-            "entry filter (honouring your Settings toggle), and the exit parameters — 2×ATR "
-            "entry stop, chandelier trail multiplier and take-profit all read from "
-            "your live Settings at run time, with the same priority order "
-            "(stop → trail → TP → reversal).\n\n"
-            "**Approximated:** fills (live: paced order at the signal-time quote; "
-            "here: next bar's open ± half-spread), intrabar exits (live: tick-by-tick; "
-            "here: bar extremes vs the previous bar's levels, worst-case ordering), "
-            "spread (live: actual; here: your fixed % input).\n\n"
-            "**Not simulated:** position sizing & cash reserve, portfolio risk caps, "
-            "the journal-evidence entry veto, execution-quality gate, pacing/stale-"
-            "signal guard, recovery/breakeven floor, and the LLM strategy. These "
-            "mostly REMOVE marginal trades live, so the live bot typically takes a "
-            "subset of the trades you see here."
+            f"**{names.get(data['strategy'], data['strategy'])} · {data['label']} · "
+            f"{data['interval']}** — {res.n_bars} candles ({data['span']}) · {_risk_tag} · "
+            f"signal window **{data.get('window_bars', 0)} candles, same as the live bot**"
         )
+
+        m1, m2, m3, m4, m5, m6 = st.columns(6)
+        m1.metric("Trades", s["n"])
+        m2.metric("P&L", f"${s['pnl']:+,.2f}")
+        m3.metric("Win rate", f"{s['win_rate']*100:.0f}%")
+        m4.metric("Profit factor", "∞" if s["pf"] == float("inf") else f"{s['pf']:.2f}")
+        m5.metric("Max drawdown", f"${s['max_dd']:,.2f}")
+        m6.metric("OOS PF (last 30%)", "∞" if oos["pf"] == float("inf") else f"{oos['pf']:.2f}",
+                  help=f"{oos['n']} out-of-sample trades")
+        if res.regime_skipped:
+            st.caption(f"🧭 Regime filter suppressed {res.regime_skipped} signal(s) — "
+                       "same gate the live bots apply.")
+
+        # ── Price chart with every entry & exit ──────────────────────────────────
+        st.plotly_chart(_chart_with_trades(df, res.trades),
+                        use_container_width=True, key="bt_price_chart")
+        st.caption(_MARKER_CAPTION)
+
+        # ── Equity curve + breakdowns ─────────────────────────────────────────────
+        if res.trades:
+            eq = go.Figure(go.Scatter(x=[t.exit_time for t in res.trades], y=res.equity_curve,
+                                      mode="lines+markers", line=dict(width=2)))
+            eq.add_hline(y=0, line_dash="dot", line_width=1)
+            eq.update_layout(height=240, margin=dict(l=10, r=10, t=26, b=10),
+                             title="Cumulative P&L ($)",
+                             paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
+            st.plotly_chart(eq, use_container_width=True, key="bt_equity")
+
+            r1, r2 = st.columns(2)
+            with r1:
+                st.markdown("**By exit reason**")
+                br = res.by_reason()
+                _render_df_table(pd.DataFrame(
+                    [{"Reason": k, "n": v["n"], "P&L $": v["pnl"]} for k, v in
+                     sorted(br.items(), key=lambda kv: kv[1]["pnl"])],
+                ))
+            with r2:
+                st.markdown("**In-sample vs out-of-sample**")
+                _render_df_table(pd.DataFrame([
+                    {"Segment": "first 70%", "n": ins["n"], "P&L $": ins["pnl"],
+                     "PF": ins["pf"] if ins["pf"] != float("inf") else 99.0},
+                    {"Segment": "last 30%", "n": oos["n"], "P&L $": oos["pnl"],
+                     "PF": oos["pf"] if oos["pf"] != float("inf") else 99.0},
+                ]))
+
+            with st.expander(f"All {len(res.trades)} trades"):
+                _render_df_table(pd.DataFrame([{
+                    "Dir": t.direction, "Entry": t.entry_time, "Exit": t.exit_time,
+                    "Entry px": t.entry_price, "Exit px": t.exit_price,
+                    "P&L $": t.pnl_dollars, "P&L %": t.pnl_pct,
+                    "Reason": t.reason, "Conf": t.confidence,
+                } for t in res.trades]))
+        else:
+            st.caption("No trades in this window (signals never fired, or the regime "
+                       "filter suppressed them all).")
+
+        with st.expander("How faithful is this to the live bots?"):
+            st.markdown(
+                "**Identical to live:** the strategy signal code itself (same module the "
+                "bots call), signals computed on closed candles only **over the same "
+                "rolling window length the live bot uses (its candle_count)**, the regime "
+                "entry filter (honouring your Settings toggle), and the exit parameters — 2×ATR "
+                "entry stop, chandelier trail multiplier and take-profit all read from "
+                "your live Settings at run time, with the same priority order "
+                "(stop → trail → TP → reversal).\n\n"
+                "**Approximated:** fills (live: paced order at the signal-time quote; "
+                "here: next bar's open ± half-spread), intrabar exits (live: tick-by-tick; "
+                "here: bar extremes vs the previous bar's levels, worst-case ordering), "
+                "spread (live: actual; here: your fixed % input).\n\n"
+                "**Not simulated:** position sizing & cash reserve, portfolio risk caps, "
+                "the journal-evidence entry veto, execution-quality gate, pacing/stale-"
+                "signal guard, recovery/breakeven floor, and the LLM strategy. These "
+                "mostly REMOVE marginal trades live, so the live bot typically takes a "
+                "subset of the trades you see here."
+            )
+
+    # ── Fleet optimization — always available below the single backtest ───────
+    _render_fleet_optimization(instruments, names, float(amount), float(spread_pct))

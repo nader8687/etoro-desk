@@ -2,12 +2,9 @@
 
 from __future__ import annotations
 
-
-
+import numpy as np
 import pandas as pd
-
 import streamlit as st
-
 
 
 import exit_profiles
@@ -154,11 +151,55 @@ def _exit_profile_fields(kind: str, data: dict) -> dict:
     }
 
 
+def _optional_float(value) -> float:
+    if value is None:
+        return float("nan")
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float("nan")
 
+
+def _build_bot_overrides_df(
+    specs: list,
+    overrides: dict,
+) -> pd.DataFrame:
+    """Arrow-safe frame for st.data_editor (glide-data-grid blanks on unicode cols / object dtypes)."""
+    names = display_names()
+    seen: set[str] = set()
+    rows: list[dict] = []
+    for spec in sorted(specs, key=lambda s: s.key):
+        if spec.key in seen:
+            continue
+        seen.add(spec.key)
+        ov = overrides.get(spec.key) or {}
+        prof = exit_profiles.profile(spec.strategy, spec.label)
+        rows.append({
+            "bot": str(spec.key),
+            "strategy": str(names.get(spec.strategy, spec.strategy)),
+            "class": str(prof.kind),
+            "trailing_pct": _optional_float(ov.get("trailing_stop_pct")),
+            "take_profit_pct": _optional_float(ov.get("take_profit_pct")),
+            "atr_stop_mult": _optional_float(ov.get("atr_stop_mult")),
+            "atr_trail_mult": _optional_float(ov.get("atr_trail_mult")),
+        })
+
+    cols = (
+        "bot", "strategy", "class",
+        "trailing_pct", "take_profit_pct", "atr_stop_mult", "atr_trail_mult",
+    )
+    if not rows:
+        return pd.DataFrame(columns=list(cols))
+
+    df = pd.DataFrame(rows)
+    for col in ("bot", "strategy", "class"):
+        df[col] = df[col].fillna("").astype(object)
+    for col in ("trailing_pct", "take_profit_pct", "atr_stop_mult", "atr_trail_mult"):
+        df[col] = pd.to_numeric(df[col], errors="coerce").astype(np.float64)
+    return df.drop_duplicates(subset=["bot"], keep="first").reset_index(drop=True)
 
 
 def render() -> None:
-
     st.subheader("Settings")
 
     st.caption(
@@ -1017,115 +1058,74 @@ def render() -> None:
     st.caption("Leave blank to use the strategy-class defaults above.")
 
     specs = instrument_config.load_specs()
-
-    rows = []
-
     overrides = cfg.get("bot_overrides") or {}
+    df = _build_bot_overrides_df(specs, overrides)
 
-    for spec in sorted(specs, key=lambda s: s.key):
+    if df.empty:
+        st.info("No bots in instruments.toml — add instruments to edit per-bot exits.")
+    else:
+        edited = st.data_editor(
+            df,
+            column_config={
+                "bot": st.column_config.TextColumn(
+                    "Bot", disabled=True,
+                    help="Bot key from instruments.toml — one row per configured bot.",
+                ),
+                "strategy": st.column_config.TextColumn(
+                    "Strategy", disabled=True,
+                    help="Strategy assigned to this bot (determines default exit class).",
+                ),
+                "class": st.column_config.TextColumn(
+                    "Class", disabled=True,
+                    help="Exit behaviour class: trend, mean_revert, arb, or llm — maps to "
+                         "the Exit profiles section above.",
+                ),
+                "trailing_pct": st.column_config.NumberColumn(
+                    "Trailing %", min_value=0.0, max_value=20.0, step=0.1, format="%.1f",
+                    help="Override trailing stop % for this bot only.  Blank = use the "
+                         "strategy-class default from Exit profiles above.",
+                ),
+                "take_profit_pct": st.column_config.NumberColumn(
+                    "Take-profit %", min_value=0.0, max_value=20.0, step=0.1, format="%.1f",
+                    help="Override hard take-profit % for this bot only.  Blank = use "
+                         "the strategy-class default.  0 disables take-profit for that bot.",
+                ),
+                "atr_stop_mult": st.column_config.NumberColumn(
+                    "Stop ×ATR", min_value=0.5, max_value=8.0, step=0.5, format="%.1f",
+                    help="Entry-stop ATR multiple for this bot only (golden rule = 2.0). "
+                         "Blank = the class value from ATR settings above.",
+                ),
+                "atr_trail_mult": st.column_config.NumberColumn(
+                    "Trail ×ATR", min_value=0.5, max_value=8.0, step=0.5, format="%.1f",
+                    help="Chandelier trailing-stop ATR multiple for this bot only. "
+                         "Blank = the class value from ATR settings above.",
+                ),
+            },
+            hide_index=True,
+            use_container_width=True,
+            height=min(560, 38 + len(df) * 35),
+            num_rows="fixed",
+            key="settings_bot_overrides_v2",
+        )
 
-        ov = overrides.get(spec.key, {})
-
-        prof = exit_profiles.profile(spec.strategy, spec.label)
-
-        rows.append({
-
-            "bot": spec.key,
-
-            "strategy": display_names().get(spec.strategy, spec.strategy),
-
-            "class": prof.kind,
-
-            "trailing %": ov.get("trailing_stop_pct"),
-
-            "take-profit %": ov.get("take_profit_pct"),
-
-        })
-
-
-
-    df = pd.DataFrame(rows)
-
-    edited = st.data_editor(
-
-        df,
-
-        column_config={
-
-            "bot": st.column_config.TextColumn(
-                "Bot", disabled=True,
-                help="Bot key from instruments.toml — one row per configured bot.",
-            ),
-
-            "strategy": st.column_config.TextColumn(
-                "Strategy", disabled=True,
-                help="Strategy assigned to this bot (determines default exit class).",
-            ),
-
-            "class": st.column_config.TextColumn(
-                "Class", disabled=True,
-                help="Exit behaviour class: trend, mean_revert, arb, or llm — maps to "
-                     "the Exit profiles section above.",
-            ),
-
-            "trailing %": st.column_config.NumberColumn(
-
-                "Trailing %", min_value=0.0, max_value=20.0, step=0.1, format="%.1f",
-
-                help="Override trailing stop % for this bot only.  Blank = use the "
-                     "strategy-class default from Exit profiles above.",
-
-            ),
-
-            "take-profit %": st.column_config.NumberColumn(
-
-                "Take-profit %", min_value=0.0, max_value=20.0, step=0.1, format="%.1f",
-
-                help="Override hard take-profit % for this bot only.  Blank = use "
-                     "the strategy-class default.  0 disables take-profit for that bot.",
-
-            ),
-
-        },
-
-        hide_index=True,
-
-        use_container_width=True,
-
-        key="settings_bot_overrides_editor",
-
-    )
-
-
-
-    if st.button("Save per-bot overrides", type="primary"):
-
-        bot_out: dict[str, dict] = {}
-
-        for _, row in edited.iterrows():
-
-            entry: dict[str, float] = {}
-
-            if pd.notna(row["trailing %"]):
-
-                entry["trailing_stop_pct"] = float(row["trailing %"])
-
-            if pd.notna(row["take-profit %"]):
-
-                entry["take_profit_pct"] = float(row["take-profit %"])
-
-            if entry:
-
-                bot_out[str(row["bot"])] = entry
-
-        user_settings.save(bot_overrides=bot_out)
-
-        trading_engine.refresh_all_exit_params()
-
-        st.success("Per-bot overrides saved.")
-
-        st.rerun()
-
+        if st.button("Save per-bot overrides", type="primary"):
+            bot_out: dict[str, dict] = {}
+            for _, row in edited.iterrows():
+                entry: dict[str, float] = {}
+                if pd.notna(row["trailing_pct"]):
+                    entry["trailing_stop_pct"] = float(row["trailing_pct"])
+                if pd.notna(row["take_profit_pct"]):
+                    entry["take_profit_pct"] = float(row["take_profit_pct"])
+                if pd.notna(row["atr_stop_mult"]):
+                    entry["atr_stop_mult"] = float(row["atr_stop_mult"])
+                if pd.notna(row["atr_trail_mult"]):
+                    entry["atr_trail_mult"] = float(row["atr_trail_mult"])
+                if entry:
+                    bot_out[str(row["bot"])] = entry
+            user_settings.save(bot_overrides=bot_out)
+            trading_engine.refresh_all_exit_params()
+            st.success("Per-bot overrides saved.")
+            st.rerun()
 
 
     with st.expander("How exits are applied (reference)"):

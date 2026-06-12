@@ -690,6 +690,7 @@ def _maybe_open_trade(
             client=client,
             demo_amount=open_amount,
             bot_id=state.bot_uuid,
+            bot_key=config.bot_id,
             strategy=config.strategy_name,
             exec_risk=_exec_risk,
             net_edge_pct=_net_edge,
@@ -1302,7 +1303,7 @@ def _run_tick(bot_id: str, state: _EngineState) -> None:
                 state.bot_uuid, ask_, bid_,
                 config.trailing_stop_pct, client,
                 atr_pct=_atr_now,
-                atr_mult=_ep.atr_trail_mult(config.strategy_name),
+                atr_mult=_ep.atr_trail_mult(config.strategy_name, config.bot_id),
             )
         if closed:
             with _lock:
@@ -1798,6 +1799,26 @@ def _resolve_bot_key(instrument_id: int, bot_id: Optional[str] = None) -> Option
     return _iid_to_primary.get(instrument_id)
 
 
+def _default_bot_for(iid: int, label: str = "") -> Optional[str]:
+    """First configured bot key for an instrument (matched by id, else label).
+
+    Used by the UI entry points when no engine exists yet for the instrument
+    (e.g. a Trading-tab sync or Start-button callback firing before app boot).
+    Binding to a real configured bot instead of minting a str(iid)-keyed legacy
+    engine keeps trades attributed and keeps stray engines from shadowing the
+    configured fleet."""
+    try:
+        import instrument_config
+        for spec in instrument_config.load_specs():
+            if (spec.instrument_id and spec.instrument_id == iid) or (
+                label and spec.label == label
+            ):
+                return spec.key
+    except Exception:
+        pass
+    return None
+
+
 def get_snapshot(
     instrument_id: Optional[int] = None,
     bot_id: Optional[str] = None,
@@ -1963,6 +1984,29 @@ def engine_count() -> int:
         return len(_engines)
 
 
+def engine_keys() -> list[str]:
+    """Keys of all registered engines (configured bot keys, or legacy iid-strings)."""
+    with _lock:
+        return list(_engines)
+
+
+# True only after app boot has registered the full instruments.toml fleet in
+# THIS process.  engine_count()>0 is NOT a valid substitute: a single stray
+# engine created by a UI path before boot (e.g. an instrument-id-keyed legacy
+# engine) once masked the boot guard and left all configured bots unstarted
+# for hours with no errors anywhere.
+_fleet_booted: bool = False
+
+
+def fleet_booted() -> bool:
+    return _fleet_booted
+
+
+def mark_fleet_booted() -> None:
+    global _fleet_booted
+    _fleet_booted = True
+
+
 def auto_trade_count() -> int:
     """Bots effectively trading (user ON and market open)."""
     with _lock:
@@ -2125,10 +2169,14 @@ def ensure_running(config: EngineConfig, hist_df: Optional[pd.DataFrame] = None)
     """
     global _active_iid, _active_bot_id
     iid = config.instrument_id
-    # Resolve bot_id: if not set, reuse the primary bot registered for this iid
+    # Resolve bot_id: if not set, reuse the primary bot registered for this iid;
+    # before boot (no engines yet) fall back to the first configured bot so we
+    # never mint a legacy str(iid)-keyed engine for a configured instrument.
     if not config.bot_id:
         with _lock:
             primary = _iid_to_primary.get(iid)
+        if not primary:
+            primary = _default_bot_for(iid, config.instrument_label)
         if primary:
             config = replace(config, bot_id=primary)
     with _lock:
@@ -2141,10 +2189,13 @@ def update_from_ui(config: EngineConfig, hist_df: Optional[pd.DataFrame] = None)
     """Called from Streamlit to push latest user settings to the background engine."""
     global _active_iid, _active_bot_id
     iid = config.instrument_id
-    # Resolve bot_id before configuring the hub so both point to the same key
+    # Resolve bot_id before configuring the hub so both point to the same key.
+    # Same fallback chain as ensure_running: primary, else first configured bot.
     if not config.bot_id:
         with _lock:
             primary = _iid_to_primary.get(iid)
+        if not primary:
+            primary = _default_bot_for(iid, config.instrument_label)
         if primary:
             config = replace(config, bot_id=primary)
     with _lock:

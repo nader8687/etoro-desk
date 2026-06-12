@@ -2349,21 +2349,26 @@ def _boot_background_engines() -> None:
     """
     global _ENGINES_BOOTED
     # Primary guard lives in trading_engine (a module imported once, so its state
-    # survives Streamlit re-executing this script on every rerun).  If engines are
-    # already registered, boot has run — skip the costly start_instrument loop.
-    if _ENGINES_BOOTED or trading_engine.engine_count() > 0:
+    # survives Streamlit re-executing this script on every rerun).  Guard on the
+    # explicit fleet-boot flag — NOT on engine_count(): a single stray engine
+    # created by a UI path before boot (Trading-tab sync / Start callback) once
+    # masked a count-based guard and silently left all configured bots unstarted.
+    if _ENGINES_BOOTED or trading_engine.fleet_booted():
         _ENGINES_BOOTED = True
         return
-    _ENGINES_BOOTED = True
 
     specs = instrument_config.load_specs()
     if not specs:
-        return
+        return  # transient (missing/empty toml) — retry on the next rerun
 
     # Resolve instrument_id=0 entries using the live eToro instruments list
     resolved = instrument_config.resolve_ids(specs, ALL_INSTRUMENTS)
     if not resolved:
-        return
+        return  # transient (instrument list hiccup) — retry on the next rerun
+
+    # Latch only once we're actually registering the fleet.
+    _ENGINES_BOOTED = True
+    trading_engine.mark_fleet_booted()
 
     _boot_log = logging.getLogger("app.boot")
     for spec in resolved:
@@ -3873,7 +3878,7 @@ def bots_live_fragment() -> None:
         key=lambda b: _freq_order.index(b) if b in _freq_order else 99,
     )
 
-    fc1, fc2, fc3 = st.columns(3)
+    fc1, fc2, fc3, fc4 = st.columns(4)
     with fc1:
         _strat_filter = st.selectbox(
             "Filter by strategy",
@@ -3895,12 +3900,25 @@ def bots_live_fragment() -> None:
             format_func=lambda k: _FREQ_FILTER_LABELS.get(k, k),
             key="bots_filter_frequency",
         )
+    with fc4:
+        _state_filter = st.selectbox(
+            "Filter by state",
+            options=["__all__", "on", "off"],
+            format_func=lambda k: {"__all__": "All states", "on": "🟢 On (auto-trade)",
+                                   "off": "⭕ Off"}[k],
+            key="bots_filter_state",
+        )
+
+    def _bot_is_on(key: str) -> bool:
+        snap = all_snaps.get(key)
+        return bool(snap and snap.trading_active)
 
     visible = [
         s for s in resolved
         if (_strat_filter == "__all__" or s.strategy == _strat_filter)
         and (_stock_filter == "__all__" or s.label == _stock_filter)
         and (_freq_filter == "__all__" or _freq_bucket(s.interval_secs) == _freq_filter)
+        and (_state_filter == "__all__" or _bot_is_on(s.key) == (_state_filter == "on"))
     ]
     _visible_pairs = [(s.key, s.instrument_id) for s in visible]
 
