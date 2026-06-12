@@ -187,7 +187,7 @@ def portfolio_table_html(live_rows: list[dict]) -> str:
     )
 
 
-def _owner_chip_html(owner: str) -> str:
+def _owner_chip_html(owner: str, bot_key: str = "") -> str:
     chip_style = (
         "font-size:0.72rem;padding:2px 7px;border-radius:10px;"
         "white-space:nowrap;display:inline-block"
@@ -197,10 +197,19 @@ def _owner_chip_html(owner: str) -> str:
             f'<span style="{chip_style};color:#888;background:#2a2e39">'
             "Manual</span>"
         )
-    return (
+    chip = (
         f'<span style="{chip_style};color:#0e1117;background:#4da6ff;'
-        f'font-weight:600">🤖 {html.escape(owner)}</span>'
+        f'font-weight:600;cursor:pointer">🤖 {html.escape(owner)}</span>'
     )
+    if bot_key:
+        # Deep-link: clicking the chip opens the Trading tab bound to this bot
+        # (?view_bot=<key> is consumed at the top of app.py before nav renders).
+        return (
+            f'<a href="?view_bot={html.escape(bot_key)}" target="_self" '
+            f'style="text-decoration:none" '
+            f'title="Open {html.escape(owner)} in the Trading tab">{chip}</a>'
+        )
+    return chip
 
 
 _PF_POS_COLGROUP = (
@@ -234,7 +243,9 @@ def _portfolio_position_row_cells(p: dict) -> str:
     )
     chg_html = portfolio_price_change_html(p)
     opened = html.escape(str(p.get("_open_display") or "—"))
-    owner_html = _owner_chip_html(str(p.get("_owner") or "Manual"))
+    owner_html = _owner_chip_html(
+        str(p.get("_owner") or "Manual"), str(p.get("_owner_key") or ""),
+    )
     return (
         f'<td class="pf-left"><p class="pf-symbol">{symbol}</p><p class="pf-name">{name}</p></td>'
         f'<td class="pf-right pf-col-price-gap">'

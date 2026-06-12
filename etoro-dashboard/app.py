@@ -305,6 +305,21 @@ def _apply_start_auto_trade() -> None:
 
 _init_persistent_state()
 
+# ── Deep-link: ?view_bot=<key> (Portfolio bot chip → Trading tab) ─────────────
+# Consumed HERE, before the nav widget is instantiated, so the same run renders
+# the Trading tab already bound to the requested bot (same mechanism as the
+# Bots-tab "View →" button).
+try:
+    _vb = st.query_params.get("view_bot")
+    if _vb:
+        del st.query_params["view_bot"]
+        import instrument_config as _ic_deeplink
+        if any(s.key == _vb for s in _ic_deeplink.load_specs()):
+            st.session_state["engine_active_bot_key"] = _vb
+            st.session_state["main_nav"] = "Trading"
+except Exception:
+    pass
+
 # Bumps on every full-script rerun (tab switch, button, etc.) — NOT on fragment-only
 # timer ticks.  General Stats uses this to avoid recomputing on navigation.
 st.session_state["_parent_run_token"] = st.session_state.get("_parent_run_token", 0) + 1
@@ -2102,24 +2117,24 @@ def render_portfolio_close_select(positions: list[dict], is_demo: bool) -> None:
             st.rerun()
 
 
-def _owner_label_for_position(p: dict, uuid_to_key: dict[str, str]) -> str:
-    """Return the bot key that owns this eToro position, or 'Manual'.
+def _owner_label_for_position(p: dict, uuid_to_key: dict[str, str]) -> tuple[str, str]:
+    """Return (display label, bot key) for this position's owner.
 
     A position belongs to a bot when our tracked trade for that instrument links
     to it by etoro_position_id and carries the bot's UUID.  Anything else — a
-    sibling/manual position, or one we never opened — is 'Manual'.
-    """
+    sibling/manual position, or one we never opened — is ('Manual', '').
+    The key feeds the Portfolio chip's deep-link into the Trading tab."""
     pid = p.get("position_id")
     if pid is None:
-        return "Manual"
+        return "Manual", ""
     # Match the exact position to its owning bot — by the live tracked trade, then
     # the persisted owner map (covers positions opened by a bot in a past session).
     trade = trade_manager.find_open_by_position_id(pid)
     uuid = trade.bot_id if (trade and trade.bot_id) else trade_manager.owner_of_position(pid)
     if uuid:
         key = uuid_to_key.get(uuid)
-        return _bot_display_name(key) if key else "Bot"
-    return "Manual"
+        return (_bot_display_name(key), key) if key else ("Bot", "")
+    return "Manual", ""
 
 
 _PF_EPOCH_UTC = datetime(1970, 1, 1, tzinfo=timezone.utc)
@@ -2164,7 +2179,7 @@ def render_portfolio_with_close(positions: list[dict], is_demo: bool) -> None:
     # ── Tag each row with its owning bot (or Manual) ──────────────────────────
     _uuid_to_key = {v: k for k, v in bot_registry.get_all().items()}
     for r in live_rows:
-        r["_owner"] = _owner_label_for_position(r, _uuid_to_key)
+        r["_owner"], r["_owner_key"] = _owner_label_for_position(r, _uuid_to_key)
 
     # ── Bot / Manual filter ───────────────────────────────────────────────────
     _bot_n    = sum(1 for r in live_rows if r["_owner"] != "Manual")
@@ -2228,10 +2243,30 @@ def render_portfolio_with_close(positions: list[dict], is_demo: bool) -> None:
 
     with st.container(border=True):
         if not is_demo:
+            # API close is demo-only — real account shows the plain table.
             st.html(vtables.portfolio_positions_table_html(live_rows))
         else:
-            st.html(vtables.portfolio_positions_table_html(live_rows))
-            render_portfolio_close_select(live_rows, is_demo)
+            # Per-row ✕ Close: header + each data row rendered at the same
+            # 0.96 width fraction (identical colgroups keep columns aligned),
+            # with a native Streamlit button beside every row.  The click
+            # stashes the position id; _process_pending_portfolio_close
+            # executes it on the next render pass.
+            _hc, _hb = st.columns([0.96, 0.04], vertical_alignment="center")
+            with _hc:
+                st.html(vtables.portfolio_positions_thead_html(len(live_rows)))
+            for _r in live_rows:
+                _pid = _r.get("position_id")
+                _rc, _rb = st.columns([0.96, 0.04], vertical_alignment="center")
+                with _rc:
+                    st.html(vtables.portfolio_position_row_html(_r))
+                with _rb:
+                    if _pid and st.button(
+                        "✕", key=f"pf_close_{_pid}",
+                        help=f"Close position #{_pid} on eToro "
+                             f"({_r.get('symbol') or ''} {(_r.get('direction') or '').upper()})",
+                    ):
+                        st.session_state["_pf_pending_close"] = _pid
+                        st.rerun()
 
 
 def render_portfolio_etoro_table(

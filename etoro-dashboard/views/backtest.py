@@ -561,10 +561,15 @@ def _render_fleet_optimization(
                     try:
                         import fleet_scheduler
                         _rep = fleet_scheduler.apply_with_stability_gate()
+                        _no_row = sum(1 for s in _rep["skipped"] if "no qualified" in s[1])
+                        _weak = len(_rep["skipped"]) - _no_row
                         st.success(
                             f"Applied {len(_rep['applied'])} bot(s) · held "
                             f"{len(_rep['held_unstable'])} (params jumped — kept old) · "
-                            f"skipped {len(_rep['skipped'])} (no qualified row)."
+                            f"skipped {len(_rep['skipped'])} "
+                            f"({_no_row} not in this run — e.g. LLM or instruments "
+                            f"the run didn't sweep; {_weak} with weak OOS).  "
+                            "Skipped bots KEEP their existing exits."
                         )
                         if _rep["applied"]:
                             st.caption("Applied: " + ", ".join(
