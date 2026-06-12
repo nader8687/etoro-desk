@@ -9,6 +9,7 @@ IIDS = {
     "Bitcoin  (BTC)": 100000,
     "Tesla Motors, Inc.  (TSLA)": 1111,
     "NVIDIA Corporation  (NVDA)": 1137,
+    "Gold (Non Expiry)  (GOLD)": 18,
 }
 
 

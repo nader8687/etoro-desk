@@ -619,15 +619,21 @@ def _maybe_open_trade(
                 return
     except Exception:
         log.debug("bleeding entry gate failed open", exc_info=True)
-    # 2. Auction-window avoidance: exchange-traded instruments (eToro stock ids
-    #    are small; crypto lives at >= 100000) skip entries in the first/last N
-    #    minutes of the US session, where spreads are widest.  ORB is exempt —
-    #    its entire edge IS the opening range.
+    # 2. Auction-window avoidance: US-EQUITY instruments skip entries in the
+    #    first/last N minutes of the NYSE session, where spreads are widest.
+    #    Classified via exit_profiles.asset_class (API-registered, keyword
+    #    fallback) so commodities like gold — near-24h on their own sessions —
+    #    are never gated on NYSE hours.  ORB is exempt — its edge IS the open.
     try:
         _avoid_min = int(getattr(_us_gate.trading_settings(), "avoid_auction_minutes", 0))
     except Exception:
         _avoid_min = 0
-    if _avoid_min > 0 and instrument_id < 100000 and config.strategy_name != "orb":
+    try:
+        import exit_profiles as _ep_gate
+        _is_us_equity = _ep_gate.asset_class(config.instrument_label) in ("stock", "etf", "index")
+    except Exception:
+        _is_us_equity = instrument_id < 100000
+    if _avoid_min > 0 and _is_us_equity and config.strategy_name != "orb":
         try:
             import market_calendar as _mc_gate
             _sess_edge = _mc_gate.us_session_edge_minutes()

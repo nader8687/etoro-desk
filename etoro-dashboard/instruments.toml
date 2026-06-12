@@ -1135,3 +1135,62 @@ demo_amount        = 1000.0
 enabled            = true
 auto_trade         = true
 strategy           = "daviddtech"
+
+# ── GOLD onboarding 2026-06-12 — spread 0.026%, 8 strict-gate qualifiers ──────
+# picked 5 (diversified): candlestick 1h PF 2.44 n22 · rsi2 1h PF 2.17 n10 ·
+# donchian 15m PF 2.98 n10 · daviddtech 30m PF 2.62 n11 · stoch_rsi 10m PF 3.0 n10
+
+[instruments.gold_candlestick_1h]
+label              = "Gold (Non Expiry)  (GOLD)"
+instrument_id      = 0
+interval           = "1 Hour"
+interval_secs      = 3600
+candle_count       = 300
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = true
+strategy           = "candlestick"
+
+[instruments.gold_rsi2_1h]
+label              = "Gold (Non Expiry)  (GOLD)"
+instrument_id      = 0
+interval           = "1 Hour"
+interval_secs      = 3600
+candle_count       = 300
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = true
+strategy           = "rsi2"
+
+[instruments.gold_donchian_15m]
+label              = "Gold (Non Expiry)  (GOLD)"
+instrument_id      = 0
+interval           = "15 Minutes"
+interval_secs      = 900
+candle_count       = 300
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = true
+strategy           = "donchian"
+
+[instruments.gold_daviddtech_30m]
+label              = "Gold (Non Expiry)  (GOLD)"
+instrument_id      = 0
+interval           = "30 Minutes"
+interval_secs      = 1800
+candle_count       = 300
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = true
+strategy           = "daviddtech"
+
+[instruments.gold_stoch_rsi_10m]
+label              = "Gold (Non Expiry)  (GOLD)"
+instrument_id      = 0
+interval           = "10 Minutes"
+interval_secs      = 600
+candle_count       = 300
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = true
+strategy           = "stoch_rsi"
