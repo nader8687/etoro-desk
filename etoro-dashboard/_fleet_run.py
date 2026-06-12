@@ -2,7 +2,6 @@
 import os
 
 import backtester
-import instrument_config
 from etoro_client import get_shared_client
 
 IIDS = {
@@ -15,15 +14,25 @@ IIDS = {
 
 def main():
     c = get_shared_client(os.environ["ETORO_API_KEY"], os.environ["ETORO_USER_KEY"])
+    # Sweep EVERY sync registry strategy × asset × interval — not just plans
+    # that already have a TOML bot — so new strategies (daviddtech, rsi2,
+    # ttm_squeeze, turtle_soup, …) are ranked alongside the incumbents.
+    from types import SimpleNamespace
+    import strategies as strats_mod
     seen, plans = set(), []
-    for sp in instrument_config.load_specs():
-        if sp.strategy == "llm" or sp.label not in IIDS:
-            continue
-        k = (sp.strategy, sp.label, sp.interval_secs)
-        if k in seen:
-            continue
-        seen.add(k)
-        plans.append(sp)
+    for label in IIDS:
+        for s in strats_mod.all_strategies():
+            if s.is_async:
+                continue                      # llm — excluded by design
+            for secs in (600, 900, 1800, 3600):
+                k = (s.key, label, secs)
+                if k in seen:
+                    continue
+                seen.add(k)
+                plans.append(SimpleNamespace(
+                    strategy=s.key, label=label,
+                    interval_secs=secs, candle_count=300,
+                ))
 
     dfs, rows, skipped = {}, [], []
     for sp in plans:
@@ -54,20 +63,21 @@ def main():
         res = backtester.simulate_exits(
             df, sweep["signals"], sp.strategy, sp.label, sp.interval_secs,
             stop_mult=best["stop_mult"], trail_mult=best["trail_mult"],
-            tp_pct=best["tp_pct"], window_bars=sp.candle_count,
+            tp_pct=best["tp_pct"], min_conf=int(best.get("min_conf", 0)),
+            window_bars=sp.candle_count,
         )
         s = res.summary()
         oospf = 99.0 if best["oos"]["pf"] == float("inf") else best["oos"]["pf"]
         rows.append((*name, best["stop_mult"], best["trail_mult"], best["tp_pct"],
                      s["n"], s["win_rate"] * 100, s["pnl"], s["max_dd"],
-                     oospf, best["oos"]["n"]))
+                     oospf, best["oos"]["n"], int(best.get("min_conf", 0))))
         print("done:", name, flush=True)
 
     rows.sort(key=lambda r: r[8], reverse=True)
     print()
-    print("RANK  STRATEGY            ASSET    IVL    STOPx TRAILx TP%   N   WIN%   PNL$    MAXDD$  OOSPF OOSn")
+    print("RANK  STRATEGY            ASSET    IVL    STOPx TRAILx TP%  CONF   N   WIN%   PNL$    MAXDD$  OOSPF OOSn")
     for i, r in enumerate(rows, 1):
-        print(f"{i:4}  {r[0]:18} {r[1]:8} {r[2]:6} {r[3]:5.1f} {r[4]:5.1f} {r[5]:4.1f} {r[6]:4} {r[7]:5.1f} {r[8]:+8.2f} {r[9]:7.2f} {r[10]:5.2f} {r[11]:4}")
+        print(f"{i:4}  {r[0]:18} {r[1]:8} {r[2]:6} {r[3]:5.1f} {r[4]:5.1f} {r[5]:4.1f} {r[12]:5} {r[6]:4} {r[7]:5.1f} {r[8]:+8.2f} {r[9]:7.2f} {r[10]:5.2f} {r[11]:4}")
     print()
     for s in skipped:
         print("skipped:", s)
@@ -87,6 +97,7 @@ def main():
             "Strategy": names.get(r[0], r[0]), "Asset": r[1],
             "Interval": ivl_label.get(secs, r[2]), "Status": "ok",
             "Stop ×ATR": r[3], "Trail ×ATR": r[4], "TP %": r[5],
+            "Min conf": r[12],
             "Trades": r[6], "Win %": round(r[7], 1), "P&L $": r[8],
             "Max DD $": r[9], "OOS PF": r[10], "OOS n": r[11],
         })

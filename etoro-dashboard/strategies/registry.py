@@ -18,6 +18,9 @@ from .donchian import DonchianStrategy
 from .ichimoku import IchimokuStrategy
 from .adx import ADXStrategy
 from .daviddtech import DaviddTechStrategy
+from .rsi2 import RSI2Strategy
+from .ttm_squeeze import TTMSqueezeStrategy
+from .turtle_soup import TurtleSoupStrategy
 
 # Ordered for the UI dropdown — LLM first, then alphabetical-ish by category
 _ALL: list[Strategy] = [
@@ -35,12 +38,15 @@ _ALL: list[Strategy] = [
     # ── Breakout ─────────────────────────────────────────────────────────────
     ORBStrategy(),
     DonchianStrategy(),
+    TTMSqueezeStrategy(),
 
     # ── Mean reversion / oscillators ─────────────────────────────────────────
     RSIStrategy(),
+    RSI2Strategy(),
     StochRSIStrategy(),
     BollingerSqueezeStrategy(),
     MeanReversionStrategy(),
+    TurtleSoupStrategy(),
 
     # ── Arbitrage ─────────────────────────────────────────────────────────────
     StatArbStrategy(),

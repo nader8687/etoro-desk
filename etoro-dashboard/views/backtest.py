@@ -324,15 +324,26 @@ def _render_fleet_optimization(
                 "to": _fl_to.isoformat() if _fl_use else None,
                 "candles": _fl_candles,
             }
+            # Sweep EVERY sync strategy in the registry — not just those that
+            # already have a TOML bot — so new strategies show their potential
+            # before earning fleet slots.  LLM excluded by design (lookahead,
+            # nondeterminism, cost).  Intervals = the fleet's proven set.
+            from types import SimpleNamespace
+            import strategies as _strats_mod
+            _sweep_secs = (600, 900, 1800, 3600)
+            _strat_keys = [s.key for s in _strats_mod.all_strategies() if not s.is_async]
             seen, plans = set(), []
-            for sp in instrument_config.load_specs():
-                if sp.strategy == "llm" or sp.label not in fl_assets:
-                    continue
-                k = (sp.strategy, sp.label, sp.interval_secs)
-                if k in seen:
-                    continue
-                seen.add(k)
-                plans.append(sp)
+            for _label in sorted(fl_assets):
+                for _skey in _strat_keys:
+                    for _secs in _sweep_secs:
+                        k = (_skey, _label, _secs)
+                        if k in seen:
+                            continue
+                        seen.add(k)
+                        plans.append(SimpleNamespace(
+                            strategy=_skey, label=_label,
+                            interval_secs=_secs, candle_count=300,
+                        ))
             client = get_shared_client(
                 os.environ.get("ETORO_API_KEY", ""), os.environ.get("ETORO_USER_KEY", ""),
             )
@@ -393,7 +404,7 @@ def _render_fleet_optimization(
                 fres = backtester.simulate_exits(
                     fdf, sweep["signals"], sp.strategy, sp.label, sp.interval_secs,
                     stop_mult=fbest["stop_mult"], trail_mult=fbest["trail_mult"],
-                    tp_pct=fbest["tp_pct"],
+                    tp_pct=fbest["tp_pct"], min_conf=int(fbest.get("min_conf", 0)),
                     amount=float(amount), spread_pct=float(spread_pct),
                     window_bars=sp.candle_count,
                 )
@@ -401,7 +412,7 @@ def _render_fleet_optimization(
                 fleet_rows.append({
                     **base, "Status": "ok",
                     "Stop ×ATR": fbest["stop_mult"], "Trail ×ATR": fbest["trail_mult"],
-                    "TP %": fbest["tp_pct"],
+                    "TP %": fbest["tp_pct"], "Min conf": int(fbest.get("min_conf", 0)),
                     "Trades": fs["n"], "Win %": round(fs["win_rate"] * 100, 1),
                     "P&L $": fs["pnl"], "Max DD $": fs["max_dd"],
                     "OOS PF": 99.0 if fbest["oos"]["pf"] == float("inf") else fbest["oos"]["pf"],

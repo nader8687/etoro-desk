@@ -341,6 +341,116 @@ STRATEGY_META: dict[str, dict] = {
         "best_for": "Trending crypto/stock sessions on 15m–1h.  OOS-qualified here on XRP 30m, BTC 15m and TSLA 1h.",
     },
 
+    "rsi2": {
+        "display_name": "RSI-2 Connors (200-SMA filter)",
+        "category": "Oscillator",
+        "icon": "🩹",
+        "tagline": "Buy the 1-2 bar panic WITH the trend — the most documented short-term mean-reversion edge.",
+        "how_it_works": [
+            "From Connors & Alvarez, *Short Term Trading Strategies That Work*: markets "
+            "snap back after 1-2 bar panics, and a 2-period RSI is the sharpest panic detector.",
+            "**Trend filter — SMA(200)**: close above it = longs only, below = shorts only. "
+            "Every trade fades a short-term extreme WITH the long-term trend, never against it.",
+            "**BUY**: RSI(2) drops below 10 (deep panic < 5 adds confidence) while above the 200-SMA.",
+            "**SELL**: RSI(2) rises above 90 (euphoria > 95 adds confidence) while below the 200-SMA.",
+            "Signals fire only on ENTERING the extreme zone — one panic, one signal.",
+            "Exits run on the engine's mean-revert profile: quick take-profit banks the bounce, "
+            "ATR stop caps the times the panic was real.",
+        ],
+        "signals": {
+            "BUY":  "RSI(2) crossed under 10 in an uptrend — panic dip in a healthy trend.",
+            "SELL": "RSI(2) crossed over 90 in a downtrend — euphoric pop in a weak trend.",
+            "HOLD": "No fresh zone entry, or the extreme is against the 200-SMA trend.",
+        },
+        "parameters": [
+            ("RSI period", "2", "Ultra-short lookback — the Connors signature"),
+            ("Zones", "10 / 90", "Oversold / overbought entry triggers (5/95 = deep)"),
+            ("Trend SMA", "200", "Long-term filter — only fade extremes with the trend"),
+        ],
+        "pros": [
+            "Decades of published backtests on equities; one of the most persistent edges known",
+            "High win rate by construction — buys fear, sells greed, with the trend",
+            "Perfect complement to trend bots: it gets paid in the pullbacks that stop them out",
+        ],
+        "cons": [
+            "Catastrophic without the trend filter — never disable the SMA gate",
+            "Win-rate drops hard in crashes when 'the dip keeps dipping' (the ATR stop is the insurance)",
+        ],
+        "best_for": "Liquid stocks and majors on 15m-1h.  OOS-qualified here on BTC 30m, TSLA 15m, NVDA 30m.",
+    },
+
+    "ttm_squeeze": {
+        "display_name": "TTM Squeeze (20, 2σ/1.5ATR)",
+        "category": "Breakout",
+        "icon": "🌋",
+        "tagline": "Volatility compresses, then erupts — enter on the release bar in the momentum's direction.",
+        "how_it_works": [
+            "John Carter's classic: when **Bollinger Bands(20, 2σ) trade INSIDE Keltner "
+            "Channels(20, 1.5×ATR)**, volatility is compressed — the squeeze is ON and the "
+            "market is coiling.",
+            "The squeeze **FIRES** on the first bar the bands re-expand outside the channels "
+            "after ≥3 bars of compression.",
+            "**Momentum histogram** decides direction: a 20-bar least-squares regression of "
+            "close − midline (midline = average of the Donchian midpoint and the 20-SMA).",
+            "**BUY**: squeeze fires with positive momentum.  **SELL**: fires with negative momentum.",
+            "Longer squeezes = bigger coiled move = higher confidence.",
+        ],
+        "signals": {
+            "BUY":  "Squeeze released after ≥3 bars of compression with bullish momentum.",
+            "SELL": "Squeeze released after ≥3 bars of compression with bearish momentum.",
+            "HOLD": "Either still compressing (waiting for the release) or no squeeze at all.",
+        },
+        "parameters": [
+            ("Period", "20", "Shared length for BB, KC, and the momentum regression"),
+            ("BB σ / KC ×ATR", "2.0 / 1.5", "Band width vs channel width — the squeeze test"),
+            ("Min squeeze", "3", "Bars of compression required before a fire counts"),
+        ],
+        "pros": [
+            "Trades the highest-energy moments — compression resolving into expansion",
+            "Momentum filter keeps it on the right side of the release",
+        ],
+        "cons": [
+            "VERY selective — squeezes are rare, long quiet stretches are normal",
+            "Did not yet OOS-qualify on our 300-bar windows — backtest before giving it a bot",
+        ],
+        "best_for": "Coiling markets before news/sessions.  Currently registry-only — no live bots until it qualifies.",
+    },
+
+    "turtle_soup": {
+        "display_name": "Turtle Soup (20-bar sweep fade)",
+        "category": "Price Action",
+        "icon": "🍜",
+        "tagline": "Fade the failed breakout — when the stop-run IS the move, trade the snap-back.",
+        "how_it_works": [
+            "From Connors & Raschke, *Street Smarts* — named for eating the (Donchian-trading) "
+            "Turtles' lunch.  Modern ICT 'liquidity grab' trading is the same mechanic.",
+            "**Sweep**: this bar trades BELOW the prior 20-bar low — running the stops resting under it.",
+            "**Age**: that low must be ≥4 bars old — an established level with real stops, not churn.",
+            "**Snap**: the bar CLOSES back above the swept level — the breakdown FAILED.",
+            "**BUY** the failed breakdown; mirror logic on 20-bar highs for **SELL**.",
+            "Confidence scales with sweep depth and how much of the bar the snap-back recovered.",
+        ],
+        "signals": {
+            "BUY":  "Swept an established 20-bar low and closed back above it — failed breakdown.",
+            "SELL": "Swept an established 20-bar high and closed back below it — failed breakout.",
+            "HOLD": "No qualifying sweep-and-reclaim this candle.",
+        },
+        "parameters": [
+            ("Lookback", "20", "The breakout level being swept (Donchian's classic length)"),
+            ("Min age", "4", "Bars the swept extreme must have stood — ensures real stops under it"),
+        ],
+        "pros": [
+            "Anti-correlated with Donchian/ORB by design — paid in the chop that stops them out",
+            "OOS PF ≥ 1.0 on 14 of 15 replayable plans here — unusually consistent across assets",
+            "Liquidity-sweep logic is timeframe-agnostic and survives regime changes well",
+        ],
+        "cons": [
+            "Rare signals → small per-plan sample sizes; judge it fleet-wide, not per-bot",
+            "In a REAL breakdown the first stop is the only defence (ATR stop handles it)",
+        ],
+        "best_for": "Range-bound and stop-hunting tape.  OOS-promoted here on XRP 15m and NVDA 30m.",
+    },
+
     "ichimoku": {
         "display_name": "Ichimoku Cloud",
         "category": "Trend-Following",

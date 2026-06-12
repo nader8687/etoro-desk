@@ -17,7 +17,7 @@ try:
 except Exception:  # pragma: no cover - py<3.9 fallback (shouldn't happen on 3.11)
     ZoneInfo = None  # type: ignore
 
-DEFAULT_TZ = "UTC"
+DEFAULT_TZ = "Asia/Dubai"
 
 # Curated, practical shortlist for the selector.  Any IANA name also works if
 # set programmatically, but these cover the common trading hubs.

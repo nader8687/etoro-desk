@@ -1028,3 +1028,62 @@ demo_amount        = 1000.0
 enabled            = true
 auto_trade         = true
 strategy           = "daviddtech"
+
+# ── Research batch 2026-06-12: RSI-2 Connors + Turtle Soup (OOS-qualified) ────
+# rsi2:        btc 30m PF 2.74 n16 · tsla 15m PF 4.16 n21 · nvda 30m PF 3.47 n12
+# turtle_soup: xrp 15m PF 3.14 n9  · nvda 30m PF 2.22 n9 (14/15 plans OOS PF ≥ 1)
+
+[instruments.btc_rsi2_30m]
+label              = "Bitcoin  (BTC)"
+instrument_id      = 0
+interval           = "30 Minutes"
+interval_secs      = 1800
+candle_count       = 300
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = true
+strategy           = "rsi2"
+
+[instruments.tsla_rsi2_15m]
+label              = "Tesla Motors, Inc.  (TSLA)"
+instrument_id      = 0
+interval           = "15 Minutes"
+interval_secs      = 900
+candle_count       = 300
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = true
+strategy           = "rsi2"
+
+[instruments.nvda_rsi2_30m]
+label              = "NVIDIA Corporation  (NVDA)"
+instrument_id      = 0
+interval           = "30 Minutes"
+interval_secs      = 1800
+candle_count       = 300
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = true
+strategy           = "rsi2"
+
+[instruments.xrp_turtle_soup_15m]
+label              = "XRP  (XRP)"
+instrument_id      = 0
+interval           = "15 Minutes"
+interval_secs      = 900
+candle_count       = 300
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = true
+strategy           = "turtle_soup"
+
+[instruments.nvda_turtle_soup_30m]
+label              = "NVIDIA Corporation  (NVDA)"
+instrument_id      = 0
+interval           = "30 Minutes"
+interval_secs      = 1800
+candle_count       = 300
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = true
+strategy           = "turtle_soup"

@@ -71,12 +71,15 @@ PROFILES: dict[str, ExitProfile] = {
     "donchian":          TREND,
     "orb":               TREND,
     "daviddtech":        TREND,   # NNFX stack — baseline-gated trend rider
+    "ttm_squeeze":       TREND,   # compression breakout — ride the release
     # Mean-reverting / oscillator — bank the bounce with a hard take-profit
     "rsi":               MEAN_REVERT,
+    "rsi2":              MEAN_REVERT,  # Connors panic-dip fade
     "stoch_rsi":         MEAN_REVERT,
     "bollinger_squeeze": MEAN_REVERT,
     "mean_reversion":    MEAN_REVERT,
     "candlestick":       MEAN_REVERT,
+    "turtle_soup":       MEAN_REVERT,  # failed-breakout snap-back fade
     # Arbitrage — small, frequent edges → small hard take-profit
     "stat_arb":          ARB,
     "rate_arb":          ARB,

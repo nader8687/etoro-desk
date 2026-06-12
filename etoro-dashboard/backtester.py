@@ -67,6 +67,7 @@ class BTResult:
     trades: list = field(default_factory=list)
     equity_curve: list = field(default_factory=list)   # cumulative $ after each closed trade
     regime_skipped: int = 0   # signals suppressed by the live regime filter
+    conf_skipped: int = 0     # entries skipped by the min-confidence gate
 
     # ── metrics ──────────────────────────────────────────────────────────────
     def _pnls(self, trades=None):
@@ -406,6 +407,7 @@ def simulate_exits(
     stop_mult: float,
     trail_mult: float,
     tp_pct: float,
+    min_conf: int = 0,
     amount: float = 1000.0,
     spread_pct: float = 0.05,
     window_bars: int = 0,
@@ -511,7 +513,9 @@ def simulate_exits(
             if (direction == "LONG" and s == "SELL") or (direction == "SHORT" and s == "BUY"):
                 _close(i, closes[i], "reversal")
         elif s in ("BUY", "SELL") and pending is None:
-            if ok:
+            if min_conf > 0 and conf < min_conf:
+                result.conf_skipped += 1
+            elif ok:
                 pending = ("LONG" if s == "BUY" else "SHORT", conf)
             else:
                 result.regime_skipped += 1
@@ -533,6 +537,7 @@ def optimize_exits(
     stop_mults=(1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0),
     trail_mults=(1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0),
     tp_pcts=(0.0, 0.6, 1.2, 2.0),
+    min_confs=(0, 55, 70),
     min_is_trades: int = 8,
     window_bars: int = 0,
     progress_cb=None,
@@ -550,19 +555,23 @@ def optimize_exits(
     )
     if signals is None:
         return None
-    combos = [(sm, tm, tp) for sm in stop_mults for tm in trail_mults for tp in tp_pcts]
+    combos = [
+        (sm, tm, tp, mc)
+        for sm in stop_mults for tm in trail_mults
+        for tp in tp_pcts for mc in min_confs
+    ]
     rows = []
-    for c_i, (sm, tm, tp) in enumerate(combos):
+    for c_i, (sm, tm, tp, mc) in enumerate(combos):
         if progress_cb and c_i % 10 == 0:
             progress_cb(0.5 + 0.5 * c_i / len(combos))
         res = simulate_exits(
             df, signals, strategy_key, instrument_label, interval_secs,
-            stop_mult=sm, trail_mult=tm, tp_pct=tp,
+            stop_mult=sm, trail_mult=tm, tp_pct=tp, min_conf=mc,
             amount=amount, spread_pct=spread_pct, window_bars=window_bars,
         )
         ins, oos = res.oos_split()
         rows.append({
-            "stop_mult": sm, "trail_mult": tm, "tp_pct": tp,
+            "stop_mult": sm, "trail_mult": tm, "tp_pct": tp, "min_conf": mc,
             "is": ins, "oos": oos,
             "excluded": ins["n"] < min_is_trades,
         })

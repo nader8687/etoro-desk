@@ -69,7 +69,7 @@ class LearningSettings:
 
 @dataclass
 class DisplaySettings:
-    display_tz: str = "UTC"
+    display_tz: str = "Asia/Dubai"
 
 
 @dataclass
@@ -330,7 +330,7 @@ def learning_settings() -> LearningSettings:
 def display_settings() -> DisplaySettings:
     data = load()["display"]
     return DisplaySettings(
-        display_tz=str(data.get("display_tz", "UTC") or "UTC"),
+        display_tz=str(data.get("display_tz", "Asia/Dubai") or "Asia/Dubai"),
     )
 
 

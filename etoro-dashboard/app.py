@@ -77,10 +77,10 @@ def _init_persistent_state() -> None:
         )
         st.session_state.setdefault(
             "display_tz",
-            str(_cfg["display"].get("display_tz", "UTC") or "UTC"),
+            str(_cfg["display"].get("display_tz", "Asia/Dubai") or "Asia/Dubai"),
         )
     except Exception:
-        st.session_state.setdefault("display_tz", "UTC")
+        st.session_state.setdefault("display_tz", "Asia/Dubai")
     for _pk in ("pnl_period_mode", "perf_period_mode", "hist_period_mode"):
         st.session_state.setdefault(_pk, _DEFAULT_PERIOD)
     # Live chart defaults ON; restore persisted choice if the user explicitly turned it off
@@ -311,7 +311,7 @@ st.session_state["_parent_run_token"] = st.session_state.get("_parent_run_token"
 
 # Apply the user's chosen display timezone for this rerun.  All presentation
 # helpers (ui, views.tables, charts) localise through timez; storage stays UTC.
-timez.set_active(st.session_state.get("display_tz") or "UTC")
+timez.set_active(st.session_state.get("display_tz") or "Asia/Dubai")
 
 _perf_log = logging.getLogger("perf")
 
@@ -4926,7 +4926,7 @@ with _nav_body.container():
                 )
             with t3:
                 _tz_opts = list(timez.COMMON_ZONES)
-                _cur_tz  = st.session_state.get("display_tz", "UTC")
+                _cur_tz  = st.session_state.get("display_tz", "Asia/Dubai")
                 if _cur_tz not in _tz_opts:
                     _tz_opts.insert(0, _cur_tz)
                 st.session_state.setdefault("_tz_select", _cur_tz)
