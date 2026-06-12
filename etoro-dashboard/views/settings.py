@@ -607,6 +607,26 @@ def render() -> None:
 
         )
 
+        g1, g2 = st.columns(2)
+
+        edge_sizing = g1.checkbox(
+            "Edge-weighted sizing",
+            value=bool(trading.get("edge_sizing", True)),
+            help="Scale each bot's ticket by its plan's out-of-sample evidence "
+                 "from the fleet optimization: OOS PF ≥ 2.5 → ×1.5, ≥ 1.5 → ×1.25, "
+                 "< 1.0 → ×0.75, live-flagged BLEEDING → ×0.5.  All risk caps "
+                 "still apply after scaling.",
+        )
+
+        avoid_auction = g2.number_input(
+            "Avoid auction window (min)",
+            min_value=0, max_value=30, step=5,
+            value=int(trading.get("avoid_auction_minutes", 10)),
+            help="Stock bots skip NEW entries in the first/last N minutes of the "
+                 "US session — the widest spreads of the day.  0 = off.  ORB is "
+                 "always exempt (its edge IS the open).",
+        )
+
         st.caption("**Per-bot strategy** is on the Bots tab.")
 
         if st.form_submit_button("Save trading & sizing", type="primary"):
@@ -626,6 +646,10 @@ def render() -> None:
                 "cash_reserve_pct": float(cash_reserve),
 
                 "reserve_hard_pct": float(reserve_hard),
+
+                "edge_sizing": bool(edge_sizing),
+
+                "avoid_auction_minutes": int(avoid_auction),
 
             })
 
@@ -803,6 +827,20 @@ def render() -> None:
 
         )
 
+        block_entries = st.checkbox(
+
+            "Block NEW entries while a bot is flagged BLEEDING",
+
+            value=bool(ranking.get("bleeding_block_entries", False)),
+
+            help="The flag itself stays advisory and visible either way.  When ON, "
+
+                 "a flagged bot stops OPENING positions until it recovers — existing "
+
+                 "positions remain fully managed (stops, trails, take-profits).",
+
+        )
+
         if st.form_submit_button("Save ranking settings", type="primary"):
 
             user_settings.save(ranking={
@@ -816,6 +854,8 @@ def render() -> None:
                 "window": int(window),
 
                 "review_sec": float(review_min) * 60.0,
+
+                "bleeding_block_entries": bool(block_entries),
 
             })
 

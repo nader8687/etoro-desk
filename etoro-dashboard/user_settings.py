@@ -55,6 +55,11 @@ class TradingSettings:
     max_position_pct: float = 6.0
     cash_reserve_pct: float = 10.0
     reserve_hard_pct: float = 5.0
+    # Edge-weighted sizing: scale ticket by per-plan OOS evidence (0.5-1.5x)
+    edge_sizing: bool = True
+    # Skip stock entries in the first/last N minutes of the US session
+    # (auction spreads are widest there).  0 = off.  ORB is always exempt.
+    avoid_auction_minutes: int = 10
 
 
 @dataclass
@@ -105,6 +110,9 @@ class RankingSettings:
     pf_recover: float = 1.0
     window: int = 40
     review_sec: float = 1800.0
+    # When ON, bots flagged bleeding stop opening NEW positions (existing
+    # positions stay managed; the flag itself remains advisory/visible).
+    bleeding_block_entries: bool = False
 
 
 @dataclass

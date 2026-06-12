@@ -31,9 +31,12 @@ record WHY a trade was sized the way it was.
 """
 from __future__ import annotations
 
+import json
 import logging
+import os
 import threading
 import time
+from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Optional, TYPE_CHECKING
 
@@ -248,6 +251,82 @@ def performance_multiplier(strategy: str) -> tuple[float, str]:
 
 
 # ── Main entry point ──────────────────────────────────────────────────────────
+
+# ── Edge-weighted sizing ──────────────────────────────────────────────────────
+# Every bot used to get the same ticket.  Proven edges deserve more capital and
+# bleeding bots less — this scales the REQUESTED amount (all risk caps still
+# apply downstream):  OOS PF >= 2.5 & n >= 10 -> 1.5x · PF >= 1.5 & n >= 8 ->
+# 1.25x · PF < 1.0 -> 0.75x · live-flagged bleeding -> min(., 0.5x).
+_FLEET_OPT_PATH = Path(os.environ.get("FLEET_OPT_PATH", "/app/data/fleet_opt.json"))
+_edge_cache: dict = {"mtime": -1.0, "rows": []}
+_edge_lock = threading.Lock()
+
+
+def _fleet_rows() -> list:
+    try:
+        m = _FLEET_OPT_PATH.stat().st_mtime
+    except OSError:
+        return []
+    with _edge_lock:
+        if m != _edge_cache["mtime"]:
+            try:
+                _edge_cache["rows"] = json.loads(
+                    _FLEET_OPT_PATH.read_text(encoding="utf-8")
+                ).get("rows", [])
+                _edge_cache["mtime"] = m
+            except Exception:
+                return _edge_cache["rows"]
+        return _edge_cache["rows"]
+
+
+def edge_multiplier(bot_key: str) -> float:
+    """Ticket-size multiplier from per-plan OOS evidence + live bleeding flag.
+    1.0 when edge sizing is OFF in Settings, the bot is unknown, or there is
+    no qualified optimization row for its plan.  Fail-open: never raises."""
+    if not bot_key:
+        return 1.0
+    try:
+        import user_settings
+        if not getattr(user_settings.trading_settings(), "edge_sizing", True):
+            return 1.0
+        import instrument_config
+        spec = next(
+            (s for s in instrument_config.load_specs() if s.key == bot_key), None,
+        )
+        if spec is None:
+            return 1.0
+        import strategies as strategies_mod
+        names = strategies_mod.display_names()
+        sd, asset = names.get(spec.strategy, spec.strategy), spec.label.split()[0]
+        row = next(
+            (r for r in _fleet_rows()
+             if r.get("Status") == "ok" and r.get("Strategy") == sd
+             and r.get("Asset") == asset and r.get("Interval") == spec.interval),
+            None,
+        )
+        mult = 1.0
+        if row:
+            pf, n = float(row.get("OOS PF") or 0), int(row.get("OOS n") or 0)
+            if pf >= 2.5 and n >= 10:
+                mult = 1.5
+            elif pf >= 1.5 and n >= 8:
+                mult = 1.25
+            elif pf < 1.0:
+                mult = 0.75
+        try:
+            import bot_ranking
+            if bot_ranking.is_bleeding(
+                strategy=spec.strategy, interval=spec.interval,
+                instrument_id=spec.instrument_id,
+            ):
+                mult = min(mult, 0.5)
+        except Exception:
+            pass
+        return mult
+    except Exception:
+        return 1.0
+
+
 def size_trade(
     client: "EToroClient",
     *,
@@ -257,6 +336,7 @@ def size_trade(
     config_amount: float,
     reserve_pct: Optional[float] = None,
     inflight_usd: float = 0.0,
+    bot_key: str = "",
 ) -> SizeDecision:
     """Compute the dollar amount for a new trade.  amount=0 means SKIP.
 
@@ -268,6 +348,10 @@ def size_trade(
     flight (order_executor ledger).  Subtracted from spendable so a same-second
     burst of entries can't collectively overshoot the cash reserve that each
     one individually fits."""
+    _edge = edge_multiplier(bot_key)
+    if _edge != 1.0:
+        log.info("Edge sizing %s: x%.2f on $%.0f request", bot_key, _edge, config_amount)
+        config_amount = config_amount * _edge
     import exit_profiles
 
     stop_pct = max(exit_profiles.stop_loss_min_pct(strategy, instrument_label), 0.1)

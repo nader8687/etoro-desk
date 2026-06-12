@@ -167,5 +167,12 @@ def _poller_loop() -> None:
                 refresh_if_stale(client, demo, ttl=0)
             except Exception:
                 log.exception("Positions poller iteration failed")
+            # Equity ground-truth snapshot (5-min cadence, reuses the sizer's
+            # cached account snapshot — adds no API traffic of its own).
+            try:
+                import equity_log
+                equity_log.maybe_snapshot(client, demo)
+            except Exception:
+                pass
         if _poller_stop.wait(_poller_interval):
             return

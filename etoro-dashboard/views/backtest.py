@@ -362,6 +362,16 @@ def _render_fleet_optimization(
                         raw = client.get_hist_candles(
                             instruments[sp.label], sp.interval_secs, _fl_candles,
                         )
+                        # Deepen with the on-disk candle archive — backtests
+                        # silently get longer as the archive grows past
+                        # eToro's ~1000-candle fetch ceiling.
+                        try:
+                            import candle_archive
+                            raw = candle_archive.load_merged(
+                                instruments[sp.label], sp.interval_secs, raw,
+                            )
+                        except Exception:
+                            pass
                         if _fl_use and raw is not None and not raw.empty:
                             raw, clip_err = _clip_candles_to_range(raw, _fl_from, _fl_to)
                             dfs_cache[dkey] = (raw, clip_err)
@@ -438,6 +448,18 @@ def _render_fleet_optimization(
                 f"Replay window: **{_fleet_range_label(fleet_meta)}** · "
                 f"${float(amount):,.0f}/trade · spread {float(spread_pct):.2f}%"
             )
+            try:
+                import fleet_scheduler
+                _wf = fleet_scheduler.last_report()
+                if _wf:
+                    st.caption(
+                        f"🔁 Walk-forward {_wf.get('ts', '?')}: "
+                        f"{len(_wf.get('applied', []))} param set(s) applied · "
+                        f"{len(_wf.get('held_unstable', []))} held (unstable across windows) · "
+                        f"{len(_wf.get('skipped', []))} without a qualified row"
+                    )
+            except Exception:
+                pass
             if _saved_note:
                 st.caption(f"Showing the last saved fleet run{_saved_note} — "
                            "press the button above for a fresh one.")

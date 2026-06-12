@@ -620,6 +620,21 @@ def _render_general_stats_panel() -> None:
             "Spendable", _money(spendable),
             help="Free cash minus the reserve — what new bot trades can deploy right now",
         )
+        # Equity ground truth vs journal claim — the reconciliation line.
+        try:
+            import equity_log
+            _eq_day = equity_log.day_stats()
+            if _eq_day:
+                _j_day = equity_log.journal_day_pnl()
+                _gap = _eq_day["change"] - _j_day
+                st.caption(
+                    f"📊 Equity today: **${_eq_day['change']:+,.2f}** · journal "
+                    f"claims ${_j_day:+,.2f} (gap ${_gap:+,.2f} = slippage, fees, "
+                    f"manual & open-position drift) · day low "
+                    f"${_eq_day['low']:,.0f} · {_eq_day['n']} snapshots"
+                )
+        except Exception:
+            pass
         c8.metric(
             "Equity", _money(equity),
             help="Total account value: free cash + invested + unrealized P&L",
@@ -2389,6 +2404,17 @@ def _boot_background_engines() -> None:
     # the source of truth.
     trading_engine.prune_disabled({s.key for s in resolved})
     bot_ranking.ensure_reviewer()
+    # Data moat + weekly walk-forward (both are daemon threads, boot-once).
+    try:
+        import candle_archive
+        candle_archive.ensure_archiver(api_key, user_key)
+    except Exception:
+        logging.getLogger("app.boot").warning("candle archiver failed to start", exc_info=True)
+    try:
+        import fleet_scheduler
+        fleet_scheduler.ensure_scheduler()
+    except Exception:
+        logging.getLogger("app.boot").warning("walk-forward scheduler failed to start", exc_info=True)
 
     # Restore global auto-trade from persisted state (default OFF).  Engine threads
     # only start for bots that are actually ON — avoids dozens of idle tick loops.

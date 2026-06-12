@@ -1087,3 +1087,51 @@ demo_amount        = 1000.0
 enabled            = true
 auto_trade         = true
 strategy           = "turtle_soup"
+
+# ── Walk-forward batch 2026-06-12 evening: strict-gate qualifiers ─────────────
+# rsi2: xrp 15m PF 2.71 n10 · xrp 1h PF 2.09 n12 · btc 10m PF 2.24 n16
+# daviddtech: tsla 30m PF 2.56 n11
+
+[instruments.xrp_rsi2_15m]
+label              = "XRP  (XRP)"
+instrument_id      = 0
+interval           = "15 Minutes"
+interval_secs      = 900
+candle_count       = 300
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = true
+strategy           = "rsi2"
+
+[instruments.xrp_rsi2_1h]
+label              = "XRP  (XRP)"
+instrument_id      = 0
+interval           = "1 Hour"
+interval_secs      = 3600
+candle_count       = 300
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = true
+strategy           = "rsi2"
+
+[instruments.btc_rsi2_10m]
+label              = "Bitcoin  (BTC)"
+instrument_id      = 0
+interval           = "10 Minutes"
+interval_secs      = 600
+candle_count       = 300
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = true
+strategy           = "rsi2"
+
+[instruments.tsla_daviddtech_30m]
+label              = "Tesla Motors, Inc.  (TSLA)"
+instrument_id      = 0
+interval           = "30 Minutes"
+interval_secs      = 1800
+candle_count       = 300
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = true
+strategy           = "daviddtech"

@@ -113,3 +113,23 @@ def us_session_state(now: datetime | None = None) -> str:
 
 def is_us_equity_open(now: datetime | None = None) -> bool:
     return us_session_state(now) == "open"
+
+
+def us_session_edge_minutes(now: datetime | None = None) -> "tuple[float, float] | None":
+    """(minutes_since_open, minutes_to_close) while the US regular session is
+    open at *now*, else None.  Drives the auction-window entry gate: the first
+    and last minutes of the session carry the widest spreads of the day."""
+    if now is None:
+        now = datetime.now(tz=timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    if us_session_state(now) != "open":
+        return None
+    ny = now.astimezone(NY)
+    close_t = HALF_CLOSE_T if ny.date() in us_half_days(ny.year) else CLOSE_T
+    open_dt = ny.replace(hour=OPEN_T.hour, minute=OPEN_T.minute, second=0, microsecond=0)
+    close_dt = ny.replace(hour=close_t.hour, minute=close_t.minute, second=0, microsecond=0)
+    return (
+        (ny - open_dt).total_seconds() / 60.0,
+        (close_dt - ny).total_seconds() / 60.0,
+    )

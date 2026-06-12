@@ -594,6 +594,60 @@ def _maybe_open_trade(
         # itself should use reality, not the signal-time snapshot.
         ask, bid = _new_ask, _new_bid
 
+    # ── Entry-quality gates (Settings-driven) ─────────────────────────────────
+    # 1. Bleeding auto-demote: when the Settings toggle is ON, a bot carrying
+    #    the advisory BLEEDING flag stops opening NEW positions (existing ones
+    #    stay fully managed; the flag stays visible either way).
+    try:
+        import user_settings as _us_gate
+        if getattr(_us_gate.ranking_settings(), "bleeding_block_entries", False):
+            import bot_ranking as _br_gate
+            if _br_gate.is_bleeding(bot_id=state.bot_uuid):
+                _reason = ("bot is flagged BLEEDING and Settings blocks new "
+                           "entries while bleeding (existing positions still managed)")
+                log.info("Entry blocked on %s (%s): %s",
+                         config.instrument_label, config.strategy_name, _reason)
+                engine_notify.push(
+                    "signal_skipped",
+                    f"{config.instrument_label}: {_signal} skipped — {_reason}",
+                    instrument_id=instrument_id,
+                )
+                _annotate_signal_exec(
+                    state, trigger_at=at, signal_type="entry", decision=_signal,
+                    status="skipped", reason=_reason,
+                )
+                return
+    except Exception:
+        log.debug("bleeding entry gate failed open", exc_info=True)
+    # 2. Auction-window avoidance: exchange-traded instruments (eToro stock ids
+    #    are small; crypto lives at >= 100000) skip entries in the first/last N
+    #    minutes of the US session, where spreads are widest.  ORB is exempt —
+    #    its entire edge IS the opening range.
+    try:
+        _avoid_min = int(getattr(_us_gate.trading_settings(), "avoid_auction_minutes", 0))
+    except Exception:
+        _avoid_min = 0
+    if _avoid_min > 0 and instrument_id < 100000 and config.strategy_name != "orb":
+        try:
+            import market_calendar as _mc_gate
+            _sess_edge = _mc_gate.us_session_edge_minutes()
+        except Exception:
+            _sess_edge = None
+        if _sess_edge is not None and (
+            _sess_edge[0] < _avoid_min or _sess_edge[1] < _avoid_min
+        ):
+            _reason = (
+                f"auction window — {'first' if _sess_edge[0] < _avoid_min else 'last'} "
+                f"{_avoid_min} min of the US session has the widest spreads"
+            )
+            log.info("Entry skipped on %s (%s): %s",
+                     config.instrument_label, config.strategy_name, _reason)
+            _annotate_signal_exec(
+                state, trigger_at=at, signal_type="entry", decision=_signal,
+                status="skipped", reason=_reason,
+            )
+            return
+
     # ── Dynamic position sizing ───────────────────────────────────────────────
     # Risk-based, performance-adaptive, account-aware (see position_sizer).
     # config.demo_amount is only the fallback when the account API is down.
@@ -608,6 +662,7 @@ def _maybe_open_trade(
         is_demo=config.is_demo,
         config_amount=config.demo_amount,
         inflight_usd=order_executor.inflight_cash(),
+        bot_key=config.bot_id,
     )
     if decision.amount <= 0:
         # Not enough spendable cash.  For a strong-enough signal, try to free
@@ -2116,10 +2171,52 @@ def clear_trade_error(instrument_id: int) -> None:
 
 # ── Supervisor (shared across all instruments) ────────────────────────────────
 
+_watchdog_alert_at: float = 0.0
+
+
+def _signal_watchdog() -> None:
+    """Silent-fleet detector — the Jun-11 failure mode (engines registered,
+    zero signal evaluation for nine hours, no errors anywhere) must never be
+    silent again.  If any engine thread is RUNNING but the signal log has not
+    been written for ~2.5x the smallest running interval (min 35 min), raise
+    an engine notification + error log, repeating at most hourly."""
+    global _watchdog_alert_at
+    try:
+        with _lock:
+            running_secs = [
+                s.config.interval_seconds for s in _engines.values()
+                if s.running and s.config.trading_active
+            ]
+        if not running_secs:
+            return
+        import signal_log as _slog
+        try:
+            age = time.time() - _slog.LOG_PATH.stat().st_mtime
+        except OSError:
+            age = float("inf")
+        threshold = max(2100.0, 2.5 * float(min(running_secs)))
+        if age < threshold:
+            return
+        now = time.time()
+        if now - _watchdog_alert_at < 3600.0:
+            return
+        _watchdog_alert_at = now
+        msg = (
+            f"WATCHDOG: {len(running_secs)} bot(s) running but no signal has "
+            f"been written for {age / 60.0:.0f} min — signal evaluation may "
+            f"be stalled.  Check engine threads / restart the container."
+        )
+        log.error(msg)
+        engine_notify.push("watchdog", msg)
+    except Exception:
+        log.debug("watchdog check failed open", exc_info=True)
+
+
 def _supervisor_loop() -> None:
     while True:
         try:
             _sync_all_market_hours()
+            _signal_watchdog()
             if _desired_live:
                 with _lock:
                     items = list(_engines.items())
