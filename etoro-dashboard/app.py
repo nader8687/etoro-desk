@@ -4334,7 +4334,8 @@ def _fmt_pf(pf: float) -> str:
 
 _PERF_TABLE_CSS = """
 <style>
-table.perf-table{width:100%;border-collapse:collapse;font-size:0.86rem;margin:0.15rem 0 0.6rem;}
+.perf-table-wrap{max-width:100%;overflow-x:auto;margin:0.15rem 0 0.6rem;}
+table.perf-table{width:100%;border-collapse:collapse;font-size:0.86rem;margin:0;}
 table.perf-table th{text-align:right;padding:6px 10px;border-bottom:1px solid rgba(255,255,255,0.18);
   color:#9aa4b2;font-weight:600;white-space:nowrap;}
 table.perf-table th:first-child,table.perf-table td:first-child{text-align:left;}
@@ -4364,9 +4365,14 @@ def _render_table(df: "pd.DataFrame", *, empty_msg: str = "No data yet.") -> Non
         )
         body_rows.append(f"<tr>{cells}</tr>")
     html = (
+        # Wrapper contains the nowrap table inside its st.column: wide content
+        # scrolls horizontally WITHIN the column instead of bleeding across
+        # into the neighbouring table (the side-by-side gains/losses overlap).
+        "<div class='perf-table-wrap'>"
         "<table class='perf-table'>"
         f"<thead><tr>{head}</tr></thead>"
         f"<tbody>{''.join(body_rows)}</tbody></table>"
+        "</div>"
     )
     st.markdown(html, unsafe_allow_html=True)
 
