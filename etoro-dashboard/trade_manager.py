@@ -16,7 +16,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, Optional
+from typing import TYPE_CHECKING, Any, Literal, Optional
 
 import trade_journal
 
@@ -264,6 +264,7 @@ _closing: dict[str, PaperTrade] = {}   # bot_id → trade being closed
 # the market order so a bot can't double-fire while its own response is pending.
 _opening: set[str] = set()             # bot_ids with an open in-flight
 _last_error: Optional[str] = None
+_last_open_failure: dict[str, str] = {}   # kind, reason, api_response
 
 # ── Re-adoption guard ──────────────────────────────────────────────────────────
 # Position ids we closed recently.  The background positions cache (and eToro's
@@ -584,6 +585,32 @@ _load_lineage()
 def get_last_error() -> Optional[str]:
     with _lock:
         return _last_error
+
+
+def get_last_open_failure() -> dict[str, str]:
+    """Structured context for the most recent open_trade failure (if any)."""
+    with _lock:
+        return dict(_last_open_failure)
+
+
+def _set_open_failure(
+    kind: str,
+    reason: str,
+    api_response: str = "",
+) -> None:
+    with _lock:
+        global _last_open_failure
+        _last_open_failure = {
+            "kind": kind,
+            "reason": reason,
+            "api_response": api_response,
+        }
+
+
+def _clear_open_failure() -> None:
+    with _lock:
+        global _last_open_failure
+        _last_open_failure = {}
 
 
 def _set_error(msg: Optional[str]) -> None:
@@ -927,12 +954,7 @@ def adopt_etoro_position(
     bot_id: str = "",
     strategy: str = "",
 ) -> Optional[PaperTrade]:
-    """Re-hydrate local trade state from an existing eToro demo position (e.g. after restart).
-
-    Also resolves a pending position ID: when open_trade registers a trade without
-    an etoro_position_id (eToro processing lag), this call fills it in from the
-    live portfolio data so stop-loss and manual close can operate normally.
-    """
+    """Re-hydrate local trade state from an existing eToro demo position (e.g. after restart)."""
     # A position we closed moments ago can linger in the (stale) positions
     # cache — adopting it back would create phantom duplicate closes.
     if _is_recently_closed(etoro_pos.get("position_id")):
@@ -1602,8 +1624,10 @@ def open_trade(
             return None
         _opening.add(bot_id)
 
+    _clear_open_failure()
     try:
         etoro_position_id: Optional[int] = None
+        open_response: Any = None
         # ── Steps 0-2 run under the GLOBAL open lock so concurrent bots open
         # one at a time.  This keeps the before/after portfolio diff
         # unambiguous and avoids the eToro 429 burst of simultaneous opens.
@@ -1616,7 +1640,7 @@ def open_trade(
 
             # ── Step 1: submit order — if THIS raises, no position was created ──
             try:
-                resp = client.open_demo_market_by_amount(
+                open_response = client.open_demo_market_by_amount(
                     instrument_id=instrument_id,
                     is_buy=is_buy,
                     amount=demo_amount,
@@ -1633,13 +1657,25 @@ def open_trade(
 
             # ── Step 2: resolve position ID ──────────────────────────────────
             try:
-                etoro_position_id = client.extract_position_id(resp)
+                etoro_position_id = client.extract_position_id(open_response)
             except Exception:
                 etoro_position_id = None
             if etoro_position_id is None:
                 etoro_position_id = _claim_new_position_id(
                     client, instrument_id, is_buy, before_ids, bot_id,
                 )
+
+        if etoro_position_id is None:
+            api_summary = client.summarize_order_response(open_response)
+            fail_msg = (
+                f"eToro did not confirm {direction} on {instrument_label} "
+                f"(instrument {instrument_id}) — order submitted but no new "
+                f"position appeared in the demo portfolio"
+            )
+            _set_open_failure("unconfirmed", fail_msg, api_summary)
+            _set_error(fail_msg)
+            log.error("%s — API: %s", fail_msg, api_summary)
+            return None
 
         _set_error(None)
         trade = PaperTrade(
@@ -1681,17 +1717,10 @@ def open_trade(
             instrument_id, direction, trade.entry_time, entry_price, bot_id,
         )
 
-        if etoro_position_id:
-            log.info(
-                "eToro demo %s opened @ %.5f  $%.0f  pos=%s  stop=%.5f  (bot=%s)",
-                direction, entry_price, demo_amount, etoro_position_id, stop_loss, bot_id,
-            )
-        else:
-            log.warning(
-                "eToro demo %s order submitted for instrument %s but position ID not yet "
-                "visible — adopt_etoro_position will resolve it on next portfolio refresh",
-                direction, instrument_id,
-            )
+        log.info(
+            "eToro demo %s opened @ %.5f  $%.0f  pos=%s  stop=%.5f  (bot=%s)",
+            direction, entry_price, demo_amount, etoro_position_id, stop_loss, bot_id,
+        )
         return trade
     finally:
         # Always release the reservation, success or failure

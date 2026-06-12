@@ -1194,3 +1194,139 @@ demo_amount        = 1000.0
 enabled            = true
 auto_trade         = true
 strategy           = "stoch_rsi"
+
+# ── Batch onboarding 2026-06-13: OIL / XOM / JPM / AMZN (strict-gate picks) ───
+# 29 of 244 plans qualified (OOS PF >= 2, n >= 10); 3 per instrument onboarded.
+# Diversification: OIL/XOM corr to NVDA -0.13/-0.22, to GOLD -0.48/-0.34.
+
+[instruments.oil_macd_1h]
+label              = "Oil (Non Expiry)  (OIL)"
+instrument_id      = 0
+interval           = "1 Hour"
+interval_secs      = 3600
+candle_count       = 300
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = true
+strategy           = "macd"
+
+[instruments.oil_stoch_rsi_10m]
+label              = "Oil (Non Expiry)  (OIL)"
+instrument_id      = 0
+interval           = "10 Minutes"
+interval_secs      = 600
+candle_count       = 300
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = true
+strategy           = "stoch_rsi"
+
+[instruments.oil_daviddtech_10m]
+label              = "Oil (Non Expiry)  (OIL)"
+instrument_id      = 0
+interval           = "10 Minutes"
+interval_secs      = 600
+candle_count       = 300
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = true
+strategy           = "daviddtech"
+
+[instruments.xom_rate_arb_15m]
+label              = "Exxon-Mobil  (XOM)"
+instrument_id      = 0
+interval           = "15 Minutes"
+interval_secs      = 900
+candle_count       = 300
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = true
+strategy           = "rate_arb"
+
+[instruments.xom_mean_reversion_15m]
+label              = "Exxon-Mobil  (XOM)"
+instrument_id      = 0
+interval           = "15 Minutes"
+interval_secs      = 900
+candle_count       = 300
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = true
+strategy           = "mean_reversion"
+
+[instruments.xom_ma_crossover_10m]
+label              = "Exxon-Mobil  (XOM)"
+instrument_id      = 0
+interval           = "10 Minutes"
+interval_secs      = 600
+candle_count       = 300
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = true
+strategy           = "ma_crossover"
+
+[instruments.jpm_rate_arb_1h]
+label              = "JPMorgan Chase & Co  (JPM)"
+instrument_id      = 0
+interval           = "1 Hour"
+interval_secs      = 3600
+candle_count       = 300
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = true
+strategy           = "rate_arb"
+
+[instruments.jpm_rsi_15m]
+label              = "JPMorgan Chase & Co  (JPM)"
+instrument_id      = 0
+interval           = "15 Minutes"
+interval_secs      = 900
+candle_count       = 300
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = true
+strategy           = "rsi"
+
+[instruments.jpm_mean_reversion_1h]
+label              = "JPMorgan Chase & Co  (JPM)"
+instrument_id      = 0
+interval           = "1 Hour"
+interval_secs      = 3600
+candle_count       = 300
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = true
+strategy           = "mean_reversion"
+
+[instruments.amzn_candlestick_1h]
+label              = "Amazon.com Inc  (AMZN)"
+instrument_id      = 0
+interval           = "1 Hour"
+interval_secs      = 3600
+candle_count       = 300
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = true
+strategy           = "candlestick"
+
+[instruments.amzn_rsi_10m]
+label              = "Amazon.com Inc  (AMZN)"
+instrument_id      = 0
+interval           = "10 Minutes"
+interval_secs      = 600
+candle_count       = 300
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = true
+strategy           = "rsi"
+
+[instruments.amzn_daviddtech_30m]
+label              = "Amazon.com Inc  (AMZN)"
+instrument_id      = 0
+interval           = "30 Minutes"
+interval_secs      = 1800
+candle_count       = 300
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = true
+strategy           = "daviddtech"

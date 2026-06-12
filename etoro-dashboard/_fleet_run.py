@@ -10,6 +10,10 @@ IIDS = {
     "Tesla Motors, Inc.  (TSLA)": 1111,
     "NVIDIA Corporation  (NVDA)": 1137,
     "Gold (Non Expiry)  (GOLD)": 18,
+    "Oil (Non Expiry)  (OIL)": 17,
+    "Exxon-Mobil  (XOM)": 1036,
+    "JPMorgan Chase & Co  (JPM)": 1023,
+    "Amazon.com Inc  (AMZN)": 1005,
 }
 
 

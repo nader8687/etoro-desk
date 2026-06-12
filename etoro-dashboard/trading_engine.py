@@ -324,6 +324,7 @@ def _annotate_signal_exec(
     decision: str,
     status: str,
     reason: str = "",
+    api_response: str = "",
 ) -> None:
     """Write execution outcome onto the matching Signals-tab log row."""
     if not trigger_at or not state.bot_uuid:
@@ -365,6 +366,7 @@ def _annotate_signal_exec(
         signal_type=signal_type,
         status=status,
         reason=reason,
+        api_response=api_response,
     )
 
 
@@ -776,12 +778,16 @@ def _maybe_open_trade(
             status="executed", reason="Order opened on eToro demo",
         )
     elif err := trade_manager.get_last_error():
+        failure = trade_manager.get_last_open_failure()
+        is_unconfirmed = failure.get("kind") == "unconfirmed"
         with _lock:
             _trade_errors[instrument_id] = err
         engine_notify.push("trade_error", err, instrument_id=instrument_id)
         _annotate_signal_exec(
             state, trigger_at=at, signal_type="entry", decision=_signal,
-            status="skipped", reason=err,
+            status="failed" if is_unconfirmed else "skipped",
+            reason=err,
+            api_response=failure.get("api_response", ""),
         )
 
 

@@ -833,6 +833,8 @@ def _render_signal_record(rec: dict) -> None:
     exec_tag = ""
     if exec_status == "executed":
         exec_tag = " · ✅ executed"
+    elif exec_status == "failed":
+        exec_tag = " · ❌ failed"
     elif exec_status == "skipped":
         exec_tag = " · ⛔ not executed"
     elif exec_status == "not_applicable":
@@ -853,6 +855,12 @@ def _render_signal_record(rec: dict) -> None:
 
         if exec_status == "executed":
             st.success("**Order executed** on eToro demo.")
+        elif exec_status == "failed":
+            st.error(f"**Order failed** — {exec_reason or 'eToro did not confirm the position'}")
+            api_resp = (rec.get("exec_api_response") or "").strip()
+            if api_resp:
+                st.markdown("**eToro API response**")
+                st.code(api_resp, language="text")
         elif exec_status == "skipped":
             st.error(f"**Not executed** — {exec_reason or 'blocked by engine gate'}")
         elif exec_status == "not_applicable":

@@ -177,6 +177,7 @@ def _attach_execution_meta(rec: dict, executions: dict[str, dict]) -> dict:
     out = dict(rec)
     out["exec_status"] = meta.get("status")
     out["exec_reason"] = meta.get("reason", "")
+    out["exec_api_response"] = meta.get("api_response", "")
     out["exec_at"] = meta.get("at", "")
     return out
 
@@ -190,10 +191,11 @@ def annotate_execution(
     signal_type: str,
     status: str,
     reason: str = "",
+    api_response: str = "",
 ) -> None:
     """Record whether a logged signal resulted in an eToro order.
 
-    status: executed | skipped | not_applicable
+    status: executed | skipped | failed | not_applicable
     """
     if not bot_id or not trigger_at:
         return
@@ -209,6 +211,7 @@ def annotate_execution(
     payload = {
         "status": status,
         "reason": reason,
+        "api_response": api_response,
         "at": datetime.now(timezone.utc).isoformat(),
     }
     global _exec_dirty
@@ -232,6 +235,7 @@ def annotate_execution(
                     updated = dict(rec)
                     updated["exec_status"] = status
                     updated["exec_reason"] = reason
+                    updated["exec_api_response"] = api_response
                     updated["exec_at"] = payload["at"]
                     _cache[i] = updated
                     break
