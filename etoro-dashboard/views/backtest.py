@@ -544,6 +544,36 @@ def _render_fleet_optimization(
                     "with suspicion.  P&L / win rate are the best combo replayed over "
                     "the full ~1000-candle window at your $/trade and spread inputs."
                 )
+                # ── Apply learnings — same stability-gated path the weekly
+                #    walk-forward uses: new exits only for ON bots whose row
+                #    passes the OOS gate AND whose params didn't jump across
+                #    the grid (regime-chasing protection).
+                if st.button(
+                    "✅ Apply learnings to bots (stability-gated)",
+                    key="bt_fleet_apply",
+                    help="Writes each ON bot's OOS-best stop/trail/TP from this "
+                         "saved run into its per-bot Settings overrides — but only "
+                         "when the row passes the OOS gate (PF ≥ 1, n ≥ 5) and the "
+                         "new params are within one grid step of the current ones. "
+                         "Unstable jumps are HELD for your judgment. Never "
+                         "enables or disables bots.",
+                ):
+                    try:
+                        import fleet_scheduler
+                        _rep = fleet_scheduler.apply_with_stability_gate()
+                        st.success(
+                            f"Applied {len(_rep['applied'])} bot(s) · held "
+                            f"{len(_rep['held_unstable'])} (params jumped — kept old) · "
+                            f"skipped {len(_rep['skipped'])} (no qualified row)."
+                        )
+                        if _rep["applied"]:
+                            st.caption("Applied: " + ", ".join(
+                                f"`{a[0]}` {a[1]}/{a[2]}/{a[3]}" for a in _rep["applied"]))
+                        if _rep["held_unstable"]:
+                            st.caption("Held (unstable): " + ", ".join(
+                                f"`{h[0]}`" for h in _rep["held_unstable"]))
+                    except Exception as _exc:
+                        st.error(f"Apply failed: {_exc}")
             if skipped:
                 sk_show = skipped
                 if ok_rows:
