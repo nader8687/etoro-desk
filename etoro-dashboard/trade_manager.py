@@ -213,6 +213,12 @@ class PaperTrade:
     #             stop start as the same line and the trail only tightens.
     peak_price: float = 0.0
     trail_stop_price: float = 0.0
+    # Optional per-position take-profit % set by the LLM each candle (uncapped;
+    # None = use the strategy/config default).  The LLM-managed stop is written
+    # straight to stop_loss_price (engine-side, tighten-only — see
+    # apply_llm_exit_update).  Only consulted for `llm` bots when the
+    # llm_manages_exits setting is on; inert otherwise.
+    llm_take_profit_pct: Optional[float] = None
 
 
 @dataclass
@@ -1561,6 +1567,85 @@ def _etoro_close(client: "EToroClient", trade: PaperTrade) -> None:
         else:
             _set_error(f"eToro close failed: {msg}")
             raise
+
+
+# ── LLM-managed exits (opt-in; behind the llm_manages_exits setting) ──────────
+# The asymmetric rule set, locked with the user:
+#   • STOP is a safety floor — the LLM may only TIGHTEN it (protective direction),
+#     never loosen it, and never below the mechanical entry stop.  Enforced
+#     engine-side (no stop-edit endpoint exists; the server stop stays at the
+#     entry 2xATR placement as the app-died floor, like the chandelier).
+#   • TAKE-PROFIT is NOT a safety device — it is uncapped.  The LLM may raise it,
+#     lower it, or drop it (None → ride the trailing stop).  We only sanity-check
+#     the number; we never cap it for profitability.
+# All helpers are pure and fail-safe: a malformed/absurd LLM value is ignored and
+# the existing mechanical level stands.
+
+def _validate_llm_level(
+    level: Any, *, entry: float, direction: Direction, side: Literal["stop", "tp"],
+) -> Optional[float]:
+    """A sane LLM-proposed price, or None.  Rejects non-numbers, non-positive
+    prices, values on the wrong side of entry, and absurd (>50% away)
+    hallucinations — any of which falls back to the mechanical level."""
+    try:
+        lv = float(level)
+    except (TypeError, ValueError):
+        return None
+    if lv <= 0 or entry <= 0:
+        return None
+    if abs(lv - entry) / entry > 0.50:        # >50% away ≈ certainly garbage
+        return None
+    if direction == "LONG":
+        ok = lv < entry if side == "stop" else lv > entry
+    else:
+        ok = lv > entry if side == "stop" else lv < entry
+    return lv if ok else None
+
+
+def _ratchet_stop_price(
+    direction: Direction, current_stop: float, proposed_stop: Optional[float],
+) -> float:
+    """Protective-only stop move — returns the TIGHTER of current/proposed and
+    NEVER loosens.  For a LONG a higher stop is tighter (max); for a SHORT a
+    lower stop is tighter (min).  None proposal leaves the stop unchanged."""
+    if proposed_stop is None:
+        return current_stop
+    return (max(current_stop, proposed_stop) if direction == "LONG"
+            else min(current_stop, proposed_stop))
+
+
+def apply_llm_exit_update(
+    trade: PaperTrade,
+    *,
+    llm_stop_price: Any = None,
+    llm_take_profit_price: Any = None,
+) -> dict:
+    """Apply an LLM exit verdict to an open trade in memory (inert until the
+    engine calls it for `llm` bots under llm_manages_exits).
+
+    Returns a dict describing what changed, for actionable logging.  The stop
+    only ever tightens; the take-profit is set uncapped (stored as a % of entry
+    so it slots into the existing take-profit check)."""
+    out: dict = {"stop_tightened": False, "tp_set": False, "rejected": []}
+    entry, direction = trade.entry_price, trade.direction
+
+    s = _validate_llm_level(llm_stop_price, entry=entry, direction=direction, side="stop")
+    if llm_stop_price is not None and s is None:
+        out["rejected"].append("stop")
+    new_stop = _ratchet_stop_price(direction, trade.stop_loss_price, s)
+    if new_stop != trade.stop_loss_price:
+        out["stop_tightened"] = True
+        out["old_stop"], out["new_stop"] = trade.stop_loss_price, new_stop
+        trade.stop_loss_price = new_stop
+
+    tp = _validate_llm_level(llm_take_profit_price, entry=entry, direction=direction, side="tp")
+    if llm_take_profit_price is not None and tp is None:
+        out["rejected"].append("tp")
+    if tp is not None:
+        trade.llm_take_profit_pct = round(abs(tp - entry) / entry * 100.0, 4)
+        out["tp_set"] = True
+        out["tp_pct"] = trade.llm_take_profit_pct
+    return out
 
 
 def open_trade(

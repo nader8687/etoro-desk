@@ -90,6 +90,12 @@ class BehaviorSettings:
     spread_recovery_mult: float = 2.0
     # LLM CLOSE on a losing position only executes at ≥ this confidence.
     llm_loss_cut_min_conf: int = 70
+    # When True, `llm` bots set their own stop/TP each candle: stop is clamped to
+    # the mechanical 2xATR floor and may only TIGHTEN; TP is uncapped (or None →
+    # ride the trail).  Default OFF — opt-in; live LLM bots keep profile exits
+    # until enabled.  The LLM exit logic is unbacktestable, so leave it off
+    # until a live record justifies it.
+    llm_manages_exits: bool = False
 
 
 @dataclass
