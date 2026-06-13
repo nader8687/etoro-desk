@@ -1582,7 +1582,19 @@ def open_trade(
     entry_reason: str = "",
     regime: str = "",
     confidence_calibrated: int = 0,
+    is_demo: bool = True,
 ) -> Optional[PaperTrade]:
+    # Hard guard at the order boundary: refuse any non-demo order unless the
+    # operator explicitly opted into live trading.  This build is demo-only
+    # (etoro_client has no live order method), so the default path always
+    # passes — the guard is defense-in-depth for any future live wiring.
+    import trading_mode
+    try:
+        trading_mode.assert_trade_allowed(is_demo)
+    except PermissionError as exc:
+        _set_error(str(exc))
+        log.error("open_trade refused: %s", exc)
+        return None
     signal = signal.upper()
     if signal == "BUY":
         direction: Direction = "LONG"

@@ -39,8 +39,40 @@ def main():
                     interval_secs=secs, candle_count=300,
                 ))
 
+    # ── Resumable: each finished plan is checkpointed, so a container restart
+    #    mid-sweep costs minutes, not the whole run.  The checkpoint is deleted
+    #    on successful completion.
+    import json as _json
+    PARTIAL = "/app/data/fleet_sweep_partial.json"
+    try:
+        with open(PARTIAL, encoding="utf-8") as _f:
+            partial = _json.load(_f)
+    except Exception:
+        partial = {}
+    if partial:
+        print(f"resuming: {len(partial)} plan(s) already checkpointed", flush=True)
+
+    def _ckpt():
+        try:
+            with open(PARTIAL + ".tmp", "w", encoding="utf-8") as _f:
+                _json.dump(partial, _f)
+            os.replace(PARTIAL + ".tmp", PARTIAL)
+        except Exception:
+            pass
+
+    def _finish(pk, kind, payload):
+        """Record a completed plan (kind 'row' or 'skip') and checkpoint it."""
+        (rows if kind == "row" else skipped).append(payload)
+        partial[pk] = (kind, list(payload))
+        _ckpt()
+
     dfs, rows, skipped = {}, [], []
     for sp in plans:
+        _pk = f"{sp.strategy}|{sp.label}|{sp.interval_secs}"
+        if _pk in partial:
+            kind, payload = partial[_pk]
+            (rows if kind == "row" else skipped).append(tuple(payload))
+            continue
         dkey = (sp.label, sp.interval_secs)
         if dkey not in dfs:
             try:
@@ -50,18 +82,18 @@ def main():
         df = dfs[dkey]
         name = (sp.strategy, sp.label.split()[0], f"{sp.interval_secs // 60}m")
         if df is None or len(df) < sp.candle_count + 50:
-            skipped.append((*name, "no history"))
+            _finish(_pk, "skip", (*name, "no history"))
             continue
         sweep = backtester.optimize_exits(
             df, sp.strategy, sp.label, IIDS[sp.label], sp.interval_secs,
             min_is_trades=8, window_bars=sp.candle_count,
         )
         if not sweep:
-            skipped.append((*name, "not replayable"))
+            _finish(_pk, "skip", (*name, "not replayable"))
             continue
         valid = [r for r in sweep["rows"] if not r["excluded"]]
         if not valid:
-            skipped.append((*name, "too few signals"))
+            _finish(_pk, "skip", (*name, "too few signals"))
             continue
         best = max(valid, key=lambda r: (
             99.0 if r["oos"]["pf"] == float("inf") else r["oos"]["pf"], r["oos"]["pnl"]))
@@ -73,9 +105,9 @@ def main():
         )
         s = res.summary()
         oospf = 99.0 if best["oos"]["pf"] == float("inf") else best["oos"]["pf"]
-        rows.append((*name, best["stop_mult"], best["trail_mult"], best["tp_pct"],
-                     s["n"], s["win_rate"] * 100, s["pnl"], s["max_dd"],
-                     oospf, best["oos"]["n"], int(best.get("min_conf", 0))))
+        _finish(_pk, "row", (*name, best["stop_mult"], best["trail_mult"], best["tp_pct"],
+                             s["n"], s["win_rate"] * 100, s["pnl"], s["max_dd"],
+                             oospf, best["oos"]["n"], int(best.get("min_conf", 0))))
         print("done:", name, flush=True)
 
     rows.sort(key=lambda r: r[8], reverse=True)
@@ -112,6 +144,12 @@ def main():
     with open("/app/data/fleet_opt.json", "w", encoding="utf-8") as f:
         json.dump({"ts": datetime.now(tz=timezone.utc).isoformat(timespec="minutes"),
                    "rows": out}, f)
+    # Run completed cleanly — drop the resume checkpoint so the next launch
+    # starts fresh rather than replaying this run.
+    try:
+        os.remove(PARTIAL)
+    except OSError:
+        pass
     print("saved -> /app/data/fleet_opt.json")
 
 

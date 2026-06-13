@@ -343,8 +343,20 @@ def _timed(label: str, fn, *a, **k):
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 
-api_key  = os.environ.get("ETORO_API_KEY", "")
-user_key = os.environ.get("ETORO_USER_KEY", "")
+api_key  = os.environ.get("ETORO_API_KEY", "").strip()
+user_key = os.environ.get("ETORO_USER_KEY", "").strip()
+
+# Fail-fast, actionable credential check (logs once at startup; the UI auth
+# gate below still renders the friendly message).  Never logs key values.
+_missing_creds = [
+    name for name, val in (("ETORO_API_KEY", api_key), ("ETORO_USER_KEY", user_key))
+    if not val
+]
+if _missing_creds:
+    logging.getLogger("app.boot").error(
+        "Missing required credential env var(s): %s — set them in .env and "
+        "restart the container (see .env.example).", ", ".join(_missing_creds),
+    )
 
 
 @st.cache_data(ttl=30, show_spinner=False)
@@ -668,6 +680,19 @@ with st.sidebar:
         )
     is_demo = account_type == "Demo"
     st.session_state["is_demo"] = is_demo
+    if not is_demo:
+        import trading_mode
+        if trading_mode.live_trading_allowed():
+            st.warning(
+                "⚠️ **LIVE opt-in is set** (ALLOW_LIVE_TRADING). Auto-trade would "
+                "place REAL orders if a live order path exists in this build."
+            )
+        else:
+            st.info(
+                "👁️ **Real account — view only.** Auto-trade executes on Demo "
+                "only; this build has no live order path. Portfolio/P&L below are "
+                "your real balances, read-only."
+            )
 
     with st.container(border=True):
         ui.section_title("Auto Trading")
@@ -2093,24 +2118,6 @@ def render_chart_position_close(instrument_id: int, is_demo: bool) -> None:
         width="stretch",
         disabled=choice == labels[0],
     ):
-        if err := _close_portfolio_position(opts[choice], is_demo):
-            st.error(err)
-        else:
-            st.rerun()
-
-
-def render_portfolio_close_select(positions: list[dict], is_demo: bool) -> None:
-    if not positions or not is_demo:
-        return
-    opts: dict[str, dict] = {}
-    for p in positions:
-        sym = (p.get("symbol") or p.get("name") or "?").strip()
-        direction = (p.get("direction") or "LONG").upper()
-        pid = p.get("position_id") or "?"
-        opts[f"{sym} · {direction} · #{pid}"] = p
-    labels = ["— select position —", *opts.keys()]
-    choice = st.selectbox("Close position", labels, key="pf_close_pick", label_visibility="collapsed")
-    if st.button("Close selected", key="pf_close_btn", width="stretch", disabled=choice == labels[0]):
         if err := _close_portfolio_position(opts[choice], is_demo):
             st.error(err)
         else:

@@ -409,12 +409,14 @@ def _maybe_open_trade(
     _signal = (sig_result.get("signal") or "HOLD").upper()
     at = sig_result.get("_at", "")
 
-    if not config.trading_active or not config.is_demo:
+    import trading_mode
+    if not config.trading_active or not trading_mode.trade_allowed(config.is_demo):
         if _signal in ("BUY", "SELL"):
             _annotate_signal_exec(
                 state, trigger_at=at, signal_type="entry", decision=_signal,
                 status="skipped",
-                reason="Auto-trade off" if not config.trading_active else "Demo account required",
+                reason="Auto-trade off" if not config.trading_active
+                       else "Live trading disabled (demo-only build)",
             )
         return
     # Authoritative OFF: a user-disabled bot never opens, even if some path left
@@ -754,6 +756,7 @@ def _maybe_open_trade(
             demo_amount=open_amount,
             bot_id=state.bot_uuid,
             bot_key=config.bot_id,
+            is_demo=config.is_demo,
             strategy=config.strategy_name,
             exec_risk=_exec_risk,
             net_edge_pct=_net_edge,
