@@ -135,6 +135,10 @@ def main():
             "Interval": ivl_label.get(secs, r[2]), "Status": "ok",
             "Stop ×ATR": r[3], "Trail ×ATR": r[4], "TP %": r[5],
             "Min conf": r[12],
+            # Exit check-in interval — default = trade interval (no-op today).
+            # Becomes a swept value once the candle archive holds enough finer-TF
+            # history to optimize it without surfacing noise (see _exitcheck_study).
+            "Check-in": ivl_label.get(secs, r[2]),
             "Trades": r[6], "Win %": round(r[7], 1), "P&L $": r[8],
             "Max DD $": r[9], "OOS PF": r[10], "OOS n": r[11],
         })

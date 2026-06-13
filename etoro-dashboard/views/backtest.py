@@ -423,6 +423,12 @@ def _render_fleet_optimization(
                     **base, "Status": "ok",
                     "Stop ×ATR": fbest["stop_mult"], "Trail ×ATR": fbest["trail_mult"],
                     "TP %": fbest["tp_pct"], "Min conf": int(fbest.get("min_conf", 0)),
+                    # Exit check-in interval.  Default = the trade interval (= today's
+                    # behaviour: signal-reversal exit re-checked once per candle).
+                    # The interactive sweep doesn't optimize it (finer-TF history is
+                    # data-starved; see _exitcheck_study) — it's swept in the deep
+                    # CLI run once the candle archive is deep enough.
+                    "Check-in": ivl,
                     "Trades": fs["n"], "Win %": round(fs["win_rate"] * 100, 1),
                     "P&L $": fs["pnl"], "Max DD $": fs["max_dd"],
                     "OOS PF": 99.0 if fbest["oos"]["pf"] == float("inf") else fbest["oos"]["pf"],
@@ -527,6 +533,12 @@ def _render_fleet_optimization(
                               .drop(columns=["Status"])
                               .sort_values("P&L $", ascending=False)
                               .reset_index(drop=True))
+                    # Backfill Check-in for rows saved before the column existed:
+                    # an absent check-in means it equalled the trade interval.
+                    if "Check-in" in ftable.columns and "Interval" in ftable.columns:
+                        ftable["Check-in"] = ftable["Check-in"].fillna(ftable["Interval"])
+                    elif "Interval" in ftable.columns:
+                        ftable["Check-in"] = ftable["Interval"]
                     ftable.insert(0, "Rank", range(1, len(ftable) + 1))
                     st.caption(
                         f"Showing **{len(filtered)}** of **{len(ok_rows)}** "
