@@ -4115,6 +4115,19 @@ def bots_live_fragment() -> None:
                 n1, n2, n3 = st.columns([3, 2, 3])
                 with n1:
                     st.markdown(f"**{interval}** bot")
+                    # Trade interval (entries, at candle close) vs exit check-in
+                    # interval (how often the signal-reversal exit is re-checked).
+                    # Default check-in == trade interval = today's behaviour.
+                    _ci_secs = instrument_config.effective_check_in_secs(
+                        bot_key, spec.interval_secs,
+                    )
+                    _ci_lbl = instrument_config.interval_label_for_secs(_ci_secs)
+                    _ci_same = _ci_secs >= spec.interval_secs
+                    st.caption(
+                        f"⏱ trade: **{interval}** · check-in: "
+                        f"**{interval if _ci_same else _ci_lbl}**"
+                        + ("" if _ci_same else " ⚡faster exits")
+                    )
                     uuid_short = bot_uuid[:8] if bot_uuid else "—"
                     st.caption(f"id: `{uuid_short}` · key: `{bot_key}` · started {started_str}")
                     _bleed_cap = bot_ranking.card_caption(

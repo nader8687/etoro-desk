@@ -132,3 +132,47 @@ def resolve_ids(
                 spec.label,
             )
     return result
+
+
+# ── Interval helpers (trade interval + exit check-in interval) ───────────────
+# eToro's candle ladder is NOT powers of two, so a derived check-in (½, ¼ of the
+# interval) won't always land on a real interval (¼ of 30m = 7.5m doesn't exist).
+# Rule: ALWAYS round a target to the NEAREST supported interval.
+SUPPORTED_INTERVAL_SECS = (60, 300, 600, 900, 1800, 3600, 14400, 86400)
+_INTERVAL_LABELS = {
+    60: "1 Minute", 300: "5 Minutes", 600: "10 Minutes", 900: "15 Minutes",
+    1800: "30 Minutes", 3600: "1 Hour", 14400: "4 Hours", 86400: "1 Day",
+}
+
+
+def interval_label_for_secs(secs: int) -> str:
+    return _INTERVAL_LABELS.get(int(secs), f"{int(secs) // 60}m")
+
+
+def nearest_interval_secs(target_secs: float, *, max_secs: Optional[int] = None) -> int:
+    """Snap an arbitrary target to the NEAREST supported eToro interval.
+    Ties resolve to the finer (smaller) interval.  `max_secs` caps the result
+    (the exit check-in is never coarser than the bot's own trade interval)."""
+    cands = [s for s in SUPPORTED_INTERVAL_SECS if max_secs is None or s <= max_secs]
+    if not cands:
+        cands = [min(SUPPORTED_INTERVAL_SECS)]
+    return min(cands, key=lambda s: (abs(s - target_secs), s))
+
+
+def effective_check_in_secs(bot_key: str, interval_secs: int) -> int:
+    """The bot's exit check-in interval in seconds.
+
+    Default = the trade interval → today's behaviour exactly (the signal-reversal
+    exit is re-checked once per closed candle).  A per-bot `check_in_secs`
+    override (Settings bot_overrides; written by the exit_check_tf optimizer) is
+    snapped to the nearest supported interval and never exceeds the trade
+    interval.  Fail-safe: any error returns the trade interval (no-op)."""
+    try:
+        import user_settings
+        raw = user_settings.load().get("bot_overrides", {}).get(bot_key, {})
+        ci = raw.get("check_in_secs") if isinstance(raw, dict) else None
+    except Exception:
+        ci = None
+    if not ci or ci <= 0:
+        return int(interval_secs)
+    return nearest_interval_secs(float(ci), max_secs=int(interval_secs))
