@@ -412,6 +412,7 @@ def simulate_exits(
     spread_pct: float = 0.05,
     window_bars: int = 0,
     trail_arm: str = "entry",
+    exit_rev_by_bar: Optional[list] = None,
 ) -> BTResult:
     """Replay position/exit logic over a cached signal series with EXPLICIT exit
     parameters.  Mirrors run_backtest's mechanics exactly (same fills, same
@@ -521,8 +522,21 @@ def simulate_exits(
 
         s, conf, ok = signals[i]
         if in_pos:
-            if (direction == "LONG" and s == "SELL") or (direction == "SHORT" and s == "BUY"):
-                _close(i, closes[i], "reversal")
+            if exit_rev_by_bar is None:
+                # Single-timeframe: signal-reversal exit at THIS bar's close.
+                if (direction == "LONG" and s == "SELL") or (direction == "SHORT" and s == "BUY"):
+                    _close(i, closes[i], "reversal")
+            else:
+                # Multi-timeframe: scan the closed lower-timeframe bars that fall
+                # within this interval bar (chronological) and exit on the FIRST
+                # whose signal opposes the position, at that LTF bar's close.
+                # Mechanical exits above already ran (protective exits win ties).
+                # Reduces EXACTLY to the single-TF branch when the LTF == interval
+                # (each HTF bar then maps to itself) — proven by the equivalence test.
+                for _lsig, _lpx in exit_rev_by_bar[i]:
+                    if (direction == "LONG" and _lsig == "SELL") or (direction == "SHORT" and _lsig == "BUY"):
+                        _close(i, _lpx, "reversal")
+                        break
         elif s in ("BUY", "SELL") and pending is None:
             if min_conf > 0 and conf < min_conf:
                 result.conf_skipped += 1
@@ -534,6 +548,34 @@ def simulate_exits(
     if in_pos:
         _close(n - 1, closes[n - 1], "end_of_data")
     return result
+
+
+def build_exit_rev_by_bar(htf_df: pd.DataFrame, ltf_df: pd.DataFrame,
+                          ltf_signals: list) -> list:
+    """Map each interval (HTF) bar to the closed lower-timeframe bars that fall
+    within it, as (signal, close_price) pairs in chronological order — the input
+    to simulate_exits(exit_rev_by_bar=...) for multi-timeframe signal-reversal
+    exits (slow entries on the interval, faster exit re-checks on a CLOSED finer
+    timeframe).
+
+    A LTF bar at time t is assigned to the FIRST HTF bar whose timestamp is >= t,
+    i.e. the interval bar it belongs to.  Non-lookahead: every LTF bar mapped to
+    HTF bar i has time <= htf_times[i], the same information horizon the single-TF
+    reversal already uses at bar i.  When ltf_df is the HTF df (and ltf_signals
+    the HTF signals) each HTF bar maps to exactly itself, so simulate_exits
+    reduces to its single-TF path (verified by the equivalence test)."""
+    import bisect
+    htf_times = list(pd.to_datetime(htf_df["time"], utc=True))
+    ltf_times = list(pd.to_datetime(ltf_df["time"], utc=True))
+    ltf_close = ltf_df["Close"].astype(float).tolist()
+    out: list = [[] for _ in htf_times]
+    for j, lt in enumerate(ltf_times):
+        if j >= len(ltf_signals):
+            break
+        i = bisect.bisect_left(htf_times, lt)
+        if 0 <= i < len(out):
+            out[i].append((ltf_signals[j][0], ltf_close[j]))
+    return out
 
 
 def optimize_exits(
