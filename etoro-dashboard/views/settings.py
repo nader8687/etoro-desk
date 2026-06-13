@@ -965,6 +965,26 @@ def render() -> None:
 
         )
 
+        llm_manages = st.checkbox(
+
+            "LLM manages its own exits (sets stop/TP, re-checks every ~1 min while holding)",
+
+            value=bool(behavior.get("llm_manages_exits", False)),
+
+            help="When ON, `llm` bots set their own stop and take-profit each check and "
+
+                 "re-evaluate the open position about every minute (they stay 15m/1h bots "
+
+                 "for ENTRIES). The stop may only TIGHTEN and never go looser than the "
+
+                 "mechanical 2×ATR floor; the take-profit is uncapped. OFF = today's "
+
+                 "behaviour (profile exits, exit check only at candle close). This exit "
+
+                 "logic is NOT backtestable — keep affected bots small and watch them.",
+
+        )
+
         if st.form_submit_button("Save behavior", type="primary"):
 
             user_settings.save(behavior={
@@ -980,6 +1000,8 @@ def render() -> None:
                 "spread_recovery_mult": float(spread_rec_mult),
 
                 "llm_loss_cut_min_conf": int(llm_cut_conf),
+
+                "llm_manages_exits": bool(llm_manages),
 
             })
 

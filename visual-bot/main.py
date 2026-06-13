@@ -117,6 +117,10 @@ class ExitResponse(BaseModel):
     reasoning:      str
     observations:   list[str]
     trend_strength: str          # STRONG | WEAKENING | REVERSING
+    # LLM-managed exit levels (nullable): stop = where to cut (protective side,
+    # tighten-only downstream); take_profit = target (null = ride the trend).
+    stop_loss:      Optional[float] = None
+    take_profit:    Optional[float] = None
 
 
 @app.get("/health")

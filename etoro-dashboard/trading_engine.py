@@ -47,6 +47,10 @@ TICK_INTERVAL     = 1.0
 # latency for entry detection is negligible.
 FLAT_TICK_INTERVAL = 10.0
 IDLE_TICK_INTERVAL = 30.0   # auto-trade OFF and flat — minimal CPU
+# While an LLM bot HOLDS a position it re-checks its exit this often (it stays a
+# 15m/1h bot for ENTRIES, but manages an open trade minute-by-minute).  Only
+# active for `llm` bots when the llm_manages_exits setting is on.
+EXIT_RECHECK_SEC = float(os.environ.get("LLM_EXIT_RECHECK_SEC", "60"))
 ADOPT_SUPPRESS_SEC = 45.0
 # Grace period before treating a tracked position as "vanished" (closed
 # externally).  Protects against the positions-cache lag right after opening.
@@ -118,6 +122,7 @@ class _EngineState:
     started_at:          datetime = field(default_factory=lambda: datetime.now(tz=timezone.utc))
     bot_uuid:            str = ""   # assigned from bot_registry on start_instrument
     market_closed:       bool = False  # True while the instrument's exchange is closed (stocks)
+    last_exit_check:     float = 0.0   # monotonic; LLM intra-candle exit re-check throttle
 
 
 # ── Module-level registry ─────────────────────────────────────────────────────
@@ -794,6 +799,15 @@ def _maybe_open_trade(
         )
 
 
+def _llm_manages_exits() -> bool:
+    """Opt-in: LLM bots set their own stop/TP and re-check exits every ~1 min."""
+    try:
+        import user_settings
+        return bool(user_settings.behavior_settings().llm_manages_exits)
+    except Exception:
+        return False
+
+
 def _maybe_process_exit(
     instrument_id: int,
     exit_result: dict,
@@ -811,6 +825,20 @@ def _maybe_process_exit(
     state.processed_exit_at = at
     action = exit_result.get("action", "HOLD").upper()
 
+    trade = trade_manager.get_open(state.bot_uuid)
+    # LLM-managed exits: apply the model's stop/TP on EVERY processed check
+    # (tighten-only stop, uncapped TP) regardless of the CLOSE/HOLD verdict.
+    # Gated + fail-safe; a no-op until the visual-bot emits numeric levels.
+    if trade is not None and _llm_manages_exits():
+        _upd = trade_manager.apply_llm_exit_update(
+            trade,
+            llm_stop_price=exit_result.get("stop_loss", exit_result.get("stop")),
+            llm_take_profit_price=exit_result.get("take_profit"),
+        )
+        if _upd.get("stop_tightened") or _upd.get("tp_set") or _upd.get("rejected"):
+            log.info("LLM exit-manage [%s]: %s",
+                     state.config.bot_id or instrument_id, _upd)
+
     if action != "CLOSE":
         _annotate_signal_exec(
             state, trigger_at=at, signal_type="exit", decision=action,
@@ -818,7 +846,6 @@ def _maybe_process_exit(
         )
         return None
 
-    trade = trade_manager.get_open(state.bot_uuid)
     if not trade:
         _annotate_signal_exec(
             state, trigger_at=at, signal_type="exit", decision="CLOSE",
@@ -1354,9 +1381,15 @@ def _run_tick(bot_id: str, state: _EngineState) -> None:
                 enabled=_rec_on, hold_mult=_rec_mult,
                 breakeven_stop=_rec_be,
             )
-        if not closed and config.take_profit_pct > 0:
+        # LLM-managed bots may set their own UNCAPPED take-profit per candle; it
+        # overrides the (usually 0) profile TP.  Falls back to config otherwise.
+        _tp_trade = trade_manager.get_open(state.bot_uuid)
+        _eff_tp = config.take_profit_pct
+        if _tp_trade is not None and _tp_trade.llm_take_profit_pct is not None:
+            _eff_tp = _tp_trade.llm_take_profit_pct
+        if not closed and _eff_tp > 0:
             closed = trade_manager.check_take_profit(
-                state.bot_uuid, ask_, bid_, config.take_profit_pct, client,
+                state.bot_uuid, ask_, bid_, _eff_tp, client,
             )
         if not closed and config.trailing_stop_pct > 0:
             # Chandelier ATR trail (golden rule 2xATR).  Live ATR% comes from
@@ -1450,6 +1483,7 @@ def _run_tick(bot_id: str, state: _EngineState) -> None:
                         trigger_at=trigger_at,
                         bot_id=state.bot_uuid,
                     )
+                    state.last_exit_check = time.monotonic()
             else:
                 # Rule-based strategy: re-run the strategy and close if the
                 # signal reverses direction relative to the open position.
@@ -1474,6 +1508,35 @@ def _run_tick(bot_id: str, state: _EngineState) -> None:
                 latest["ask"], latest["bid"], trigger_at,
                 bot_uuid=state.bot_uuid,
             )
+
+    # ── LLM intra-candle exit management (the 1-min check-in) ─────────────────
+    # An `llm` bot stays a 15m/1h bot for ENTRIES, but once HOLDING it re-checks
+    # its exit every EXIT_RECHECK_SEC (~60s) — minute-by-minute close/stop/TP
+    # management instead of waiting for the next candle close.  Gated by
+    # llm_manages_exits (off → today's candle-close-only behaviour, unchanged).
+    if (
+        position_open and latest and market_open
+        and not new_candle_closed
+        and _llm_manages_exits()
+        and (time.monotonic() - state.last_exit_check) >= EXIT_RECHECK_SEC
+    ):
+        import strategies as _strats_mng
+        if _strats_mng.get(config.strategy_name).is_async:
+            _sig_df = (committed_data if (committed_data is not None and not committed_data.empty)
+                       else chart_data)
+            pos_ctx = trade_manager.build_exit_position_context(
+                latest["ask"], latest["bid"],
+                trade=trade_manager.get_open(state.bot_uuid),
+                etoro_pos=etoro_pos,
+            )
+            if pos_ctx and _sig_df is not None and not _sig_df.empty:
+                if signal_worker.request_exit_signal(
+                    _sig_df, instrument_id, config.instrument_label,
+                    config.interval_label, pos_ctx,
+                    trigger_at=datetime.now(tz=timezone.utc).strftime("%H:%M:%S"),
+                    bot_id=state.bot_uuid,
+                ):
+                    state.last_exit_check = time.monotonic()
 
     # Immediate dispatch when auto-trade is first enabled (don't wait for candle close)
     if (

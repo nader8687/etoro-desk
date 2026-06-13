@@ -306,8 +306,8 @@ Return JSON only in this exact format:
   "position_type": "NONE | LONG | SHORT",
   "entry_price": null,
   "current_price": null,
-  "target_price": "price level you expect the move to reach, or null for HOLD/CLOSE",
-  "invalidation_price": "price level where the trade idea is proven wrong, or null",
+  "target_price": "take-profit price to exit a winner at; when MANAGING AN OPEN POSITION always give your current target, or null to ride the trend with no fixed target",
+  "invalidation_price": "the STOP price where this position should be cut; when MANAGING AN OPEN POSITION always give a stop on the protective side of entry (below for long, above for short) — it should only tighten toward profit, never widen",
   "risk_reward": "numeric reward-to-risk ratio for an entry, or null",
   "bull_case": "strongest argument for upside, one sentence",
   "bear_case": "strongest argument for downside, one sentence",
@@ -632,4 +632,9 @@ def analyse_exit(
         "trend_strength": result.get("trend_strength", "WEAKENING"),
         "current_signal": result.get("current_signal"),
         "risk_warning": result.get("risk_warning", ""),
+        # LLM-managed exit levels: invalidation = stop, target = take-profit.
+        # Consumed by the dashboard only when llm_manages_exits is on; the
+        # dashboard validates side/distance and applies tighten-only.
+        "stop_loss": result.get("invalidation_price"),
+        "take_profit": result.get("target_price"),
     }
