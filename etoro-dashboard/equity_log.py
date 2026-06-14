@@ -56,7 +56,8 @@ def maybe_snapshot(client, is_demo: bool) -> None:
         log.debug("Equity snapshot failed", exc_info=True)
 
 
-def _read_tail(max_bytes: int = 512_000) -> list[dict]:
+def _read_all(max_bytes: int = 2_000_000) -> list[dict]:
+    """Load the full equity log (or the tail if very large)."""
     if not LOG_PATH.exists():
         return []
     try:
@@ -74,6 +75,83 @@ def _read_tail(max_bytes: int = 512_000) -> list[dict]:
         return rows
     except Exception:
         return []
+
+
+def _read_tail(max_bytes: int = 512_000) -> list[dict]:
+    return _read_all(max_bytes=max_bytes)
+
+
+def _parse_ts(ts: str) -> Optional[datetime]:
+    if not ts:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def series_since(
+    start_date,
+    *,
+    end_date=None,
+) -> list[tuple[datetime, float]]:
+    """(utc_dt, equity) points on or after start_date (date in any tz sense)."""
+    start_s = start_date.isoformat() if hasattr(start_date, "isoformat") else str(start_date)
+    end_s = end_date.isoformat() if end_date and hasattr(end_date, "isoformat") else None
+    out: list[tuple[datetime, float]] = []
+    for row in _read_all():
+        ts = _parse_ts(str(row.get("ts") or ""))
+        if ts is None:
+            continue
+        day = ts.date().isoformat()
+        if day < start_s:
+            continue
+        if end_s and day > end_s:
+            continue
+        try:
+            eq = float(row["equity"])
+        except (TypeError, ValueError, KeyError):
+            continue
+        if eq > 0:
+            out.append((ts, eq))
+    out.sort(key=lambda x: x[0])
+    return out
+
+
+def equity_curve_df(start_date, *, end_date=None):
+    """DataFrame: time (UTC), equity, change_from_start.  None if empty."""
+    import pandas as pd
+
+    pts = series_since(start_date, end_date=end_date)
+    if not pts:
+        return None
+    base = pts[0][1]
+    rows = [
+        {"time": ts, "equity": eq, "change": round(eq - base, 2)}
+        for ts, eq in pts
+    ]
+    return pd.DataFrame(rows)
+
+
+def period_stats_since(start_date, *, end_date=None) -> Optional[dict]:
+    """Summary for a date range from equity snapshots."""
+    pts = series_since(start_date, end_date=end_date)
+    if not pts:
+        return None
+    eqs = [e for _, e in pts]
+    return {
+        "first_ts": pts[0][0],
+        "last_ts": pts[-1][0],
+        "first": eqs[0],
+        "last": eqs[-1],
+        "low": min(eqs),
+        "high": max(eqs),
+        "change": round(eqs[-1] - eqs[0], 2),
+        "n": len(pts),
+    }
 
 
 def day_stats(day: Optional[str] = None) -> Optional[dict]:

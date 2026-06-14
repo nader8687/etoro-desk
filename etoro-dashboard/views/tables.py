@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import html
 from collections.abc import Callable
+from typing import Optional
 
 import timez
 import ui
@@ -317,6 +318,67 @@ def portfolio_positions_table_html(live_rows: list[dict]) -> str:
     )
 
 
+def charges_summary_html(
+    closed_stats: dict,
+    *,
+    open_stats: Optional[dict] = None,
+) -> str:
+    """Summary banner for eToro virtual-account trading charges."""
+    n = int(closed_stats.get("count") or 0)
+    api = float(closed_stats.get("api_fees") or 0)
+    est = float(closed_stats.get("est_spread") or 0)
+    est_open = float(closed_stats.get("est_open") or 0)
+    est_close = float(closed_stats.get("est_close") or 0)
+    pnl = float(closed_stats.get("net_pnl") or 0)
+    pnl_net = float(closed_stats.get("pnl_after_est_charges") or pnl)
+
+    cells = [
+        ("Closed trades", str(n), None),
+        ("API fees (history)", f"${api:,.2f}", ui.pnl_color(-api) if api else None),
+        ("Est. open spread", f"${est_open:,.2f}", None),
+        ("Est. close spread", f"${est_close:,.2f}", None),
+        ("Est. round-trip", f"${est:,.2f}", None),
+        ("Realised P&L", f"${pnl:+,.2f}", ui.pnl_color(pnl)),
+        ("P&L − est. spread", f"${pnl_net:+,.2f}", ui.pnl_color(pnl_net)),
+    ]
+    if open_stats and open_stats.get("count"):
+        oc = int(open_stats["count"])
+        oa = float(open_stats.get("api_fees_paid") or 0)
+        oe = float(open_stats.get("est_open_spread") or 0)
+        ox = float(open_stats.get("est_close_if_all_closed") or 0)
+        cells.extend([
+            ("Open positions", str(oc), None),
+            ("Open · API fees", f"${oa:,.2f}", None),
+            ("Open · est. spread paid", f"${oe:,.2f}", None),
+            ("If all closed now", f"~${ox:,.2f} more", None),
+        ])
+    note = (
+        "Virtual money only. eToro history often reports <code>fees = 0</code> on demo; "
+        "<b>Est. spread</b> uses published CFD rates (crypto 1% / stocks·ETFs 0.15% per side). "
+        "Spread is also embedded in open/close prices."
+    )
+    return (
+        '<p class="pf-section-title">Virtual account charges</p>'
+        f"{history_stats_html(cells)}"
+        f'<p style="font-size:0.78rem;color:#888;margin:0.35rem 0 0.75rem 0">{note}</p>'
+    )
+
+
+def _charge_cell_html(trade: dict) -> tuple[str, str]:
+    """API fees + estimated spread for one closed trade row."""
+    api = trade.get("_charge_api_fees")
+    est = trade.get("_charge_est_spread")
+    pct = trade.get("_charge_spread_pct")
+    api_txt = f"${float(api):,.2f}" if api not in (None, "") and float(api) > 0 else "—"
+    if est is not None and float(est) > 0:
+        est_txt = f"${float(est):,.2f}"
+        if pct:
+            est_txt += f' <span style="color:#888;font-size:0.72rem">({float(pct):g}%×2)</span>'
+    else:
+        est_txt = "—"
+    return api_txt, est_txt
+
+
 def history_trades_table_html(trades: list[dict]) -> str:
     rows_html = []
     for t in trades:
@@ -355,6 +417,8 @@ def history_trades_table_html(trades: list[dict]) -> str:
             t.get("_close_strategy", ""),
         )
 
+        fees_txt, spread_txt = _charge_cell_html(t)
+
         rows_html.append(
             f"<tr>"
             f'<td class="pf-left"><p class="pf-symbol">{stock}</p>'
@@ -366,6 +430,8 @@ def history_trades_table_html(trades: list[dict]) -> str:
             f'<td class="pf-right"><p class="pf-val">{close_txt}</p></td>'
             f'<td class="pf-right"><p class="pf-pnl" style="color:{pnl_col}">{pnl_txt}</p></td>'
             f'<td class="pf-right"><p class="pf-val">{inv_txt}</p></td>'
+            f'<td class="pf-right"><p class="pf-val">{fees_txt}</p></td>'
+            f'<td class="pf-right"><p class="pf-val">{spread_txt}</p></td>'
             f'<td class="pf-right pf-col-units-gap"><p class="pf-units">{units_txt}</p></td>'
             f'<td class="pf-left pf-col-opened"><p class="pf-ts">'
             f'{html.escape(parse_api_timestamp_short(t.get("openTimestamp")))}</p></td>'
@@ -378,10 +444,11 @@ def history_trades_table_html(trades: list[dict]) -> str:
     return (
         '<table class="pf-table pf-table-hist">'
         "<colgroup>"
-        '<col style="width:12%"><col class="pf-col-bot" style="width:22%">'
-        '<col style="width:11%"><col style="width:7%"><col style="width:7%">'
-        '<col style="width:7%"><col style="width:8%"><col style="width:6%">'
-        '<col style="width:10%"><col style="width:10%">'
+        '<col style="width:10%"><col class="pf-col-bot" style="width:18%">'
+        '<col style="width:9%"><col style="width:6%"><col style="width:6%">'
+        '<col style="width:6%"><col style="width:7%"><col style="width:5%">'
+        '<col style="width:7%"><col style="width:5%"><col style="width:9%">'
+        '<col style="width:9%">'
         "</colgroup>"
         "<thead><tr>"
         f'<th class="pf-th pf-th-left">Stock ({n})</th>'
@@ -391,6 +458,8 @@ def history_trades_table_html(trades: list[dict]) -> str:
         '<th class="pf-th pf-th-right">Close @</th>'
         '<th class="pf-th pf-th-right">P/L</th>'
         '<th class="pf-th pf-th-right">Invested</th>'
+        '<th class="pf-th pf-th-right">API fees</th>'
+        '<th class="pf-th pf-th-right">Est. spread</th>'
         '<th class="pf-th pf-th-right pf-th-units-gap">Units</th>'
         '<th class="pf-th pf-th-left pf-th-opened">Opened</th>'
         '<th class="pf-th pf-th-left pf-th-closed">Closed</th>'
@@ -400,7 +469,12 @@ def history_trades_table_html(trades: list[dict]) -> str:
     )
 
 
-def closed_trades_block_html(trades: list[dict]) -> str:
+def closed_trades_block_html(
+    trades: list[dict],
+    *,
+    charge_stats: Optional[dict] = None,
+    open_charge_stats: Optional[dict] = None,
+) -> str:
     pnl_vals = [
         float(t["netProfit"])
         for t in trades
@@ -416,7 +490,11 @@ def closed_trades_block_html(trades: list[dict]) -> str:
         ("Win rate", f"{wr:.1f}%", None),
         ("W / L", f"{wins} / {losses}", None),
     ])
+    charges = ""
+    if charge_stats is not None:
+        charges = charges_summary_html(charge_stats, open_stats=open_charge_stats)
     return (
+        f"{charges}"
         f'<p class="pf-section-title">Closed trades</p>'
         f"{stats}"
         f"{history_trades_table_html(trades)}"

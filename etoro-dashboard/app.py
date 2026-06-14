@@ -1487,7 +1487,7 @@ def render_unified_history(
         acct = "demo" if is_demo else "real"
         st.info(f"No closed trades on your eToro {acct} account for **{period_lbl}**.")
     else:
-        _render_etoro_history_results(etoro_trades)
+        _render_etoro_history_results(etoro_trades, is_demo=is_demo)
 
 
 def _enrich_history_close_methods(trades: list[dict]) -> None:
@@ -1510,7 +1510,7 @@ def _enrich_history_close_methods(trades: list[dict]) -> None:
         t["_close_strategy"] = (row or {}).get("strategy", "")
 
 
-def _render_etoro_history_results(trades: list[dict]) -> None:
+def _render_etoro_history_results(trades: list[dict], *, is_demo: bool = True) -> None:
     # Partial cash-freeing trims share one open line but get distinct position ids —
     # propagate ownership across those clusters before labelling.
     trade_manager.propagate_cluster_owners(trades)
@@ -1520,6 +1520,20 @@ def _render_etoro_history_results(trades: list[dict]) -> None:
         _uuid = trade_manager.resolve_history_owner(t)
         _key = _uuid_to_key.get(_uuid) if _uuid else None
         t["_owner"] = _bot_display_name(_key) if _key else "Manual"
+
+    import etoro_charges
+    for t in trades:
+        etoro_charges.enrich_closed_trade(t, label_for_id=_label_for_instrument_id)
+
+    open_charge_stats = None
+    if is_demo:
+        try:
+            open_pos = fetch_positions_safe(True)
+            for p in open_pos:
+                etoro_charges.enrich_open_position(p)
+            open_charge_stats = etoro_charges.summarize_open_positions(open_pos)
+        except Exception:
+            pass
 
     # ── Bot / Manual filter ───────────────────────────────────────────────────
     _bot_n    = sum(1 for t in trades if t.get("_owner") != "Manual")
@@ -1556,8 +1570,14 @@ def _render_etoro_history_results(trades: list[dict]) -> None:
                 st.info("No matches found — remaining trades look genuinely manual.")
             st.rerun()
 
+    charge_stats = etoro_charges.summarize_closed_trades(shown)
+
     with st.container(border=True):
-        st.html(vtables.closed_trades_block_html(shown))
+        st.html(vtables.closed_trades_block_html(
+            shown,
+            charge_stats=charge_stats,
+            open_charge_stats=open_charge_stats,
+        ))
 
 
 def _pnl_indicator(p: dict) -> str:
@@ -2016,7 +2036,10 @@ def _session_price_change(iid: int, current: float | None) -> tuple[float | None
 
 def _enrich_position_live(p: dict) -> dict:
     """Animate portfolio rows from REST rates (no per-position WebSocket)."""
+    import etoro_charges
+
     out = dict(p)
+    etoro_charges.enrich_open_position(out)
     iid = out.get("instrument_id")
     ch, ch_pct = _session_price_change(iid, out.get("current_rate"))
     if ch is not None:
@@ -5053,6 +5076,167 @@ def _perf_top_trades_df(
     return _perf_trade_rows_df(ranked[:limit])
 
 
+def _performance_month_start() -> "datetime.date":
+    """First day of the current calendar month in the display timezone."""
+    return datetime.now(timez.active_tz()).date().replace(day=1)
+
+
+def _cumulative_pnl_df_from_trades(
+    trades: list[dict],
+    start_date,
+) -> "pd.DataFrame":
+    """Cumulative realised P&L from eToro closed-trade rows (close time order)."""
+    rows: list[tuple] = []
+    for t in trades:
+        close_dt = _etoro_dt(t.get("closeTimestamp"))
+        if close_dt is None or close_dt.date() < start_date:
+            continue
+        try:
+            pnl_f = float(t.get("netProfit"))
+        except (TypeError, ValueError):
+            continue
+        rows.append((close_dt, pnl_f))
+    rows.sort(key=lambda x: x[0])
+    if not rows:
+        return pd.DataFrame()
+    cum = 0.0
+    out = []
+    for dt, p in rows:
+        cum = round(cum + p, 4)
+        out.append({"time": dt, "change": cum, "trade_pnl": p})
+    return pd.DataFrame(out)
+
+
+def _cumulative_pnl_df_from_journal(
+    records: list[dict],
+    start_date,
+) -> "pd.DataFrame":
+    """Cumulative bot P&L from trade-journal closes."""
+    rows: list[tuple] = []
+    for r in records:
+        raw = r.get("ts") or r.get("exit_time") or ""
+        try:
+            close_dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+            if close_dt.tzinfo is None:
+                close_dt = close_dt.replace(tzinfo=timezone.utc)
+            else:
+                close_dt = close_dt.astimezone(timezone.utc)
+        except Exception:
+            continue
+        if close_dt.date() < start_date:
+            continue
+        try:
+            pnl_f = float(r.get("pnl_dollars") or 0)
+        except (TypeError, ValueError):
+            continue
+        rows.append((close_dt, pnl_f))
+    rows.sort(key=lambda x: x[0])
+    if not rows:
+        return pd.DataFrame()
+    cum = 0.0
+    out = []
+    for dt, p in rows:
+        cum = round(cum + p, 4)
+        out.append({"time": dt, "change": cum, "trade_pnl": p})
+    return pd.DataFrame(out)
+
+
+def _render_performance_gain_chart(is_demo: bool) -> None:
+    """Cumulative gain/loss since the 1st of the current month."""
+    import equity_log
+
+    start = _performance_month_start()
+    month_lbl = start.strftime("%B %Y")
+    df = equity_log.equity_curve_df(start)
+    source = "equity snapshots"
+    first_label = ""
+
+    if df is None or df.empty:
+        source = "eToro closed trades"
+        try:
+            trades = fetch_all_etoro_trade_history(start, demo=is_demo)
+            df = _cumulative_pnl_df_from_trades(trades, start)
+        except Exception:
+            df = pd.DataFrame()
+        if df.empty:
+            source = "bot trade journal"
+            df = _cumulative_pnl_df_from_journal(
+                trade_journal.closed_records(), start,
+            )
+
+    if df is None or df.empty:
+        st.caption(
+            f"No equity snapshots or closed trades since **1 {month_lbl}** yet. "
+            "Equity points are recorded every ~5 minutes while the app runs; "
+            "closed trades appear after bots exit positions."
+        )
+        return
+
+    first_ts = df["time"].iloc[0]
+    if hasattr(first_ts, "date") and first_ts.date() > start:
+        first_label = (
+            f"First data point **{timez.fmt_iso(first_ts.astimezone(timezone.utc).isoformat(), '%d %b %H:%M')}** "
+            f"({timez.abbrev()}) — logging began after the 1st."
+        )
+
+    plot_df = df.copy()
+    plot_df["time"] = timez.localize_series(plot_df["time"])
+    change = float(plot_df["change"].iloc[-1])
+    line_col = C_UP if change >= 0 else C_DOWN
+    fill_col = ui.C_UP_RGBA if change >= 0 else ui.C_DOWN_RGBA
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=plot_df["time"],
+        y=plot_df["change"],
+        mode="lines",
+        name="Gain / loss",
+        line=dict(color=line_col, width=2.5),
+        fill="tozeroy",
+        fillcolor=fill_col,
+        hovertemplate="%{x|%d %b %H:%M}<br>$%{y:+,.2f}<extra></extra>",
+    ))
+    fig.add_hline(y=0, line_width=1, line_dash="dot", line_color=C_GRID)
+    fig.update_layout(
+        title=f"Gain / loss since 1 {month_lbl}",
+        height=340,
+        margin=dict(l=48, r=16, t=52, b=44),
+        paper_bgcolor=C_BG,
+        plot_bgcolor=C_BG,
+        font=dict(color="#c8cdd8", size=12),
+        xaxis=dict(gridcolor=C_GRID, showgrid=True, title=""),
+        yaxis=dict(
+            gridcolor=C_GRID, showgrid=True, tickprefix="$", title="vs start of period",
+        ),
+        showlegend=False,
+    )
+
+    st.markdown(f"##### Account curve · since 1 {month_lbl}")
+    m1, m2, m3, m4 = st.columns(4)
+    if "equity" in df.columns:
+        m1.metric("Start equity", f"${float(df['equity'].iloc[0]):,.0f}")
+        m2.metric("Current equity", f"${float(df['equity'].iloc[-1]):,.0f}")
+        m3.metric("Net change", f"${change:+,.2f}", delta=f"{change:+,.2f}")
+        pct = (change / float(df["equity"].iloc[0]) * 100) if df["equity"].iloc[0] else 0
+        m4.metric("Change %", f"{pct:+.2f}%")
+    else:
+        m1.metric("Realised P&L", f"${change:+,.2f}", delta=f"{change:+,.2f}")
+        m2.metric("Closed trades", str(len(df)))
+        m3.metric("Source", source)
+        m4.metric("Points", str(len(plot_df)))
+
+    st.plotly_chart(fig, use_container_width=True, key="perf_gain_chart")
+    cap = (
+        f"Based on **{source}** ({len(plot_df)} points). "
+        "Equity snapshots include open positions, spread and fees; "
+        "closed-trade lines are realised P&L only."
+    )
+    if first_label:
+        cap = first_label + " " + cap
+    st.caption(cap)
+    st.divider()
+
+
 def render_performance_lessons() -> None:
     """Dashboard view: what the bot has learned from its own closed trades."""
     _is_demo = st.session_state.get("is_demo", True)
@@ -5081,6 +5265,8 @@ def render_performance_lessons() -> None:
                     permission_error("Trade History")
                 except Exception as exc:
                     st.error(f"Import failed: {exc}")
+
+    _render_performance_gain_chart(_is_demo)
 
     total = trade_journal.total_count()
     if total == 0:

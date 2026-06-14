@@ -582,43 +582,6 @@ class EToroClient:
                     return pid
         return None
 
-    @staticmethod
-    def summarize_order_response(response: Any, *, max_len: int = 500) -> str:
-        """Compact one-line summary of an eToro open-order payload for logs/UI."""
-        if response is None:
-            return "(empty response)"
-        if not isinstance(response, dict):
-            return str(response)[:max_len]
-        parts: list[str] = []
-        for key in (
-            "ErrorCode", "errorCode", "error", "Error", "message", "Message",
-            "status", "Status", "orderID", "OrderID", "token", "Token",
-        ):
-            val = response.get(key)
-            if val not in (None, "", {}):
-                parts.append(f"{key}={val}")
-        pid = EToroClient._position_id_from_obj(response)
-        if pid:
-            parts.append(f"position_id={pid}")
-        for nest in ("orderForOpen", "order", "data", "position", "clientPortfolio"):
-            sub = response.get(nest)
-            if not isinstance(sub, dict):
-                continue
-            for key in (
-                "ErrorCode", "errorCode", "message", "Message",
-                "orderID", "OrderID", "positionID", "positionId", "id",
-            ):
-                val = sub.get(key)
-                if val not in (None, "", {}):
-                    parts.append(f"{nest}.{key}={val}")
-        if parts:
-            return "; ".join(str(p) for p in parts)[:max_len]
-        try:
-            import json
-            return json.dumps(response, default=str)[:max_len]
-        except Exception:
-            return str(response)[:max_len]
-
     def find_demo_position(
         self, instrument_id: int, is_buy: bool
     ) -> Optional[dict]:
@@ -736,6 +699,12 @@ class EToroClient:
                 pos, "stopLossRate", "StopLossRate", "stopLoss", "StopLoss",
             ),
             "leverage": self._pick_numeric(pos, "leverage", "Leverage"),
+            "total_fees": self._pick_numeric(
+                pos, "totalFees", "TotalFees",
+            ),
+            "total_external_fees": self._pick_numeric(
+                pos, "totalExternalFees", "TotalExternalFees",
+            ),
             # Open timestamp — used to place the entry arrow on the correct candle.
             # eToro uses various camelCase / PascalCase field names (and sometimes
             # an epoch) depending on the API version / endpoint; try all variants.
