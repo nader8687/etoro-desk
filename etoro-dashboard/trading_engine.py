@@ -61,6 +61,25 @@ VANISH_GRACE_SEC  = 15.0
 # still-open position (which would strip its identity and log a phantom close).
 VANISH_MISS_THRESHOLD = 5
 HTF_HIST_POLL_SEC = 30.0   # how often 4h/daily bots poll eToro for a new closed bar
+CHECK_IN_POLL_SEC = 15.0   # min spacing between LTF hist polls for faster exit check-ins
+
+
+def _check_in_poll_interval(check_in_secs: int) -> float:
+    """Poll cadence for a bot's exit check-in timeframe (never faster than 10s)."""
+    return min(CHECK_IN_POLL_SEC, max(10.0, float(check_in_secs) / 4.0))
+
+
+def _bot_check_in_secs(
+    bot_key: str,
+    interval_secs: int,
+    *,
+    toml_check_in: int = 0,
+) -> int:
+    """Effective exit check-in for a bot (overrides → toml → trade interval)."""
+    import instrument_config
+    return instrument_config.effective_check_in_secs(
+        bot_key, interval_secs, toml_check_in=toml_check_in,
+    )
 
 
 # ── Config / snapshot data types ─────────────────────────────────────────────
@@ -79,6 +98,7 @@ class EngineConfig:
     user_key:        str
     strategy_name:    str = "llm"   # key from strategies.registry
     bot_id:           str = ""     # instruments.toml key; empty = derive from iid
+    check_in_seconds: int = 0      # from instruments.toml; 0 = resolve at runtime
     trailing_stop_pct: float = 1.5  # % pullback from peak to trigger trailing close (0 = disabled)
     take_profit_pct:   float = 0.0  # hard take-profit target in % (0 = disabled)
 
@@ -119,6 +139,8 @@ class _EngineState:
     # signal dispatch instead of waiting for the next candle close.
     pending_dispatch:    bool = False
     last_htf_hist_poll:  float = 0.0   # monotonic; HTF bots poll eToro hist for bar close
+    last_check_in_poll:  float = 0.0   # monotonic; LTF hist poll for faster exit check-in
+    prev_check_in_time:  Optional[pd.Timestamp] = None  # last seen LTF committed bar
     started_at:          datetime = field(default_factory=lambda: datetime.now(tz=timezone.utc))
     bot_uuid:            str = ""   # assigned from bot_registry on start_instrument
     market_closed:       bool = False  # True while the instrument's exchange is closed (stocks)
@@ -434,6 +456,12 @@ def _maybe_open_trade(
             )
         return
     if sig_result.get("_status") != "done" or "_error" in sig_result:
+        if _signal in ("BUY", "SELL"):
+            _annotate_signal_exec(
+                state, trigger_at=at, signal_type="entry", decision=_signal,
+                status="skipped",
+                reason="Signal not ready for execution (still processing or errored)",
+            )
         return
 
     if state.processed_sig_at == at:
@@ -887,6 +915,8 @@ def _strategy_exit_check(
     client: "EToroClient",
     bot_id: str = "",
     is_primary_bot: bool = False,
+    *,
+    signal_interval_label: Optional[str] = None,
 ) -> "Optional[trade_manager.ClosedTrade]":
     """Run the rule-based strategy and close the position if signal reverses.
 
@@ -922,10 +952,11 @@ def _strategy_exit_check(
     result["strategy"] = config.strategy_name
     result.update(eq.to_dict())
 
+    _sig_ivl = signal_interval_label or config.interval_label
     # Store signal for display regardless of whether we close
     signal_worker.set_result_direct(
         instrument_id,
-        config.interval_label,
+        _sig_ivl,
         result,
         instrument_label=config.instrument_label,
         trigger_at=trigger_at,
@@ -1418,6 +1449,60 @@ def _run_tick(bot_id: str, state: _EngineState) -> None:
                 f" — ${closed.pnl_dollars:+.2f} ({closed.profit:+.5f} px)",
                 instrument_id=instrument_id,
             )
+            open_trade = None
+            trade_owned_by_us = False
+
+    # ── Faster exit check-in (rule-based, position open) ─────────────────────
+    # Fleet optimization can set check_in_secs to ½ or ¼ of the trade interval.
+    # Reversal exits then fire on the CLOSED finer-TF candle — matching the MTF
+    # backtest path.  Entries still wait for the trade-interval close below.
+    _check_in_secs = _bot_check_in_secs(
+        bot_id, config.interval_seconds, toml_check_in=config.check_in_seconds,
+    )
+    if (
+        latest and market_open and trade_owned_by_us
+        and _check_in_secs < config.interval_seconds
+    ):
+        import strategies as _strats_ci
+        _strat_ci = _strats_ci.get(config.strategy_name)
+        if not _strat_ci.is_async:
+            now_mono = time.monotonic()
+            if now_mono - state.last_check_in_poll >= _check_in_poll_interval(_check_in_secs):
+                state.last_check_in_poll = now_mono
+                ltf_data = _refresh_ltf_hist_for_check_in(
+                    bot_id, config, client, _check_in_secs,
+                )
+                if ltf_data is not None and not ltf_data.empty:
+                    ltf_last = ltf_data["time"].iloc[-1]
+                    new_ltf_close = (
+                        state.prev_check_in_time is not None
+                        and ltf_last != state.prev_check_in_time
+                    )
+                    if state.prev_check_in_time is None:
+                        state.prev_check_in_time = ltf_last
+                    elif new_ltf_close:
+                        state.prev_check_in_time = ltf_last
+                        import instrument_config as _ic
+                        _ci_lbl = _ic.interval_label_for_secs(_check_in_secs)
+                        _closed_ci = _strategy_exit_check(
+                            config, state, ltf_data, instrument_id,
+                            latest["ask"], latest["bid"],
+                            ltf_last.strftime("%H:%M:%S"),
+                            client, bot_id=bot_id, is_primary_bot=is_primary_bot,
+                            signal_interval_label=_ci_lbl,
+                        )
+                        if _closed_ci:
+                            with _lock:
+                                _last_closes[instrument_id] = _closed_ci
+                            _bump_portfolio()
+                            engine_notify.push(
+                                "trade_close",
+                                f"Closed {config.instrument_label} (check-in {_ci_lbl})"
+                                f" — ${_closed_ci.pnl_dollars:+.2f}",
+                                instrument_id=instrument_id,
+                            )
+                            open_trade = None
+                            trade_owned_by_us = False
 
     last_committed_time = chart.last_committed_time
     new_candle_closed = False
@@ -1485,22 +1570,24 @@ def _run_tick(bot_id: str, state: _EngineState) -> None:
                     )
                     state.last_exit_check = time.monotonic()
             else:
-                # Rule-based strategy: re-run the strategy and close if the
-                # signal reverses direction relative to the open position.
-                _closed = _strategy_exit_check(
-                    config, state, signal_data, instrument_id,
-                    latest["ask"], latest["bid"], trigger_at, client,
-                    bot_id=bot_id, is_primary_bot=is_primary_bot,
-                )
-                if _closed:
-                    with _lock:
-                        _last_closes[instrument_id] = _closed
-                    _bump_portfolio()
-                    engine_notify.push(
-                        "trade_close",
-                        f"Closed {config.instrument_label} — ${_closed.pnl_dollars:+.2f} ({_closed.profit:+.5f} px)",
-                        instrument_id=instrument_id,
+                # Rule-based strategy: re-run on the trade-interval close.
+                # When a faster check-in is configured, reversal exits are handled
+                # on the finer-TF close above — skip the duplicate HTF reversal.
+                if _check_in_secs >= config.interval_seconds:
+                    _closed = _strategy_exit_check(
+                        config, state, signal_data, instrument_id,
+                        latest["ask"], latest["bid"], trigger_at, client,
+                        bot_id=bot_id, is_primary_bot=is_primary_bot,
                     )
+                    if _closed:
+                        with _lock:
+                            _last_closes[instrument_id] = _closed
+                        _bump_portfolio()
+                        engine_notify.push(
+                            "trade_close",
+                            f"Closed {config.instrument_label} — ${_closed.pnl_dollars:+.2f} ({_closed.profit:+.5f} px)",
+                            instrument_id=instrument_id,
+                        )
         elif config.trading_active:
             state.pending_dispatch = False   # candle close satisfies it
             _dispatch_strategy(
@@ -1562,6 +1649,22 @@ def _run_tick(bot_id: str, state: _EngineState) -> None:
         _maybe_open_trade(config, client, instrument_id, sig_result,
                           latest["ask"], latest["bid"], state)
         position_open = trade_manager.get_open(state.bot_uuid) is not None
+    elif sig_result and latest:
+        _sig = (sig_result.get("signal") or "HOLD").upper()
+        _at = sig_result.get("_at", "")
+        if _sig in ("BUY", "SELL") and _at and sig_result.get("_status") == "done":
+            if position_open:
+                _annotate_signal_exec(
+                    state, trigger_at=_at, signal_type="entry", decision=_sig,
+                    status="skipped",
+                    reason="Bot already has an open position",
+                )
+            elif not market_open:
+                _annotate_signal_exec(
+                    state, trigger_at=_at, signal_type="entry", decision=_sig,
+                    status="skipped",
+                    reason="Market closed for this instrument",
+                )
 
     # LLM-driven exit: only relevant for async (LLM) strategies.
     # Rule-based strategies handle exit inside _strategy_exit_check above.
@@ -1663,6 +1766,7 @@ def start_instrument(
             user_key=user_key or "",
             strategy_name=spec.strategy,
             bot_id=spec.key,
+            check_in_seconds=int(spec.check_in_secs or 0),
         )
     else:
         config = spec
@@ -1787,6 +1891,36 @@ def _preload_hist(bot_key: str, iid: int, config: EngineConfig, client: EToroCli
         log.warning("Hist preload failed for %s (%s): %s", config.instrument_label, bot_key, exc)
 
 
+def _refresh_ltf_hist_for_check_in(
+    bot_key: str,
+    config: EngineConfig,
+    client: EToroClient,
+    check_in_secs: int,
+) -> Optional[pd.DataFrame]:
+    """Fetch committed OHLC at the bot's exit check-in interval."""
+    try:
+        count = config.candle_count + 20
+        df = client.get_hist_candles_cached(
+            config.instrument_id,
+            check_in_secs,
+            count,
+            ttl=0.0,
+        )
+        if df is None or df.empty:
+            return None
+        trimmed = df.tail(int(config.candle_count))
+        if "time" in trimmed.columns:
+            trimmed = trimmed.copy()
+            trimmed["time"] = pd.to_datetime(trimmed["time"], utc=True)
+        return trimmed
+    except Exception:
+        log.warning(
+            "LTF check-in hist refresh failed for %s (%ds)",
+            bot_key, check_in_secs, exc_info=True,
+        )
+        return None
+
+
 def _refresh_htf_hist_at_close(
     bot_key: str,
     config: EngineConfig,
@@ -1864,26 +1998,175 @@ def stop_bot(bot_id: str) -> None:
     log.info("Bot %s stopped", bot_id)
 
 
-def delete_bot(bot_id: str) -> tuple[bool, str]:
+def _bot_has_open_position(bot_key: str, positions: Optional[list] = None) -> bool:
+    """True when this bot owns an open eToro position (in-memory or owner map)."""
+    bot_uuid = get_bot_uuid(bot_key)
+    if trade_manager.get_open(bot_uuid) is not None:
+        return True
+    pid = trade_manager.owned_position_id(bot_uuid)
+    if pid is None:
+        return False
+    if positions:
+        return any(str(p.get("position_id")) == str(pid) for p in positions)
+    return True
+
+
+def close_bot_position(
+    bot_key: str,
+    client,
+    *,
+    positions: Optional[list] = None,
+) -> Optional[str]:
+    """Close this bot's open eToro demo position if any. Returns error text or None."""
+    import positions_cache
+
+    bot_uuid = get_bot_uuid(bot_key)
+    trade = trade_manager.get_open(bot_uuid)
+    pid: Optional[int] = None
+    if trade and trade.etoro_position_id:
+        try:
+            pid = int(trade.etoro_position_id)
+        except (TypeError, ValueError):
+            pid = None
+    if pid is None:
+        owned = trade_manager.owned_position_id(bot_uuid)
+        if owned is not None:
+            pid = int(owned)
+
+    if pid is None and trade is None:
+        return None
+
+    pos_list = positions if positions is not None else positions_cache.get_positions()
+    p = (
+        next((x for x in (pos_list or []) if str(x.get("position_id")) == str(pid)), None)
+        if pid is not None else None
+    )
+
+    iid = (p or {}).get("instrument_id")
+    if iid is None and trade is not None:
+        iid = trade.instrument_id
+    if iid is None:
+        with _lock:
+            state = _engines.get(bot_key)
+            if state:
+                iid = state.config.instrument_id
+
+    rate = 0.0
+    if p:
+        rate = float(p.get("current_rate") or p.get("open_rate") or 0)
+    elif trade:
+        rate = float(trade.entry_price or 0)
+
+    try:
+        if pid is not None and iid is not None:
+            client.close_demo_position(int(pid), int(iid))
+            positions_cache.remove_position(int(pid))
+            suppress_adopt(int(iid))
+        if trade:
+            trade_manager.close_manual(bot_uuid, rate, rate, client=None, reason="manual")
+        elif pid is not None:
+            orphan = trade_manager.find_open_by_position_id(pid)
+            if orphan:
+                trade_manager.close_manual(orphan.bot_id, rate, rate, client=None, reason="manual")
+            else:
+                trade_manager.clear_position_owner(pid)
+        log.info("Closed position for bot %s before delete (pid=%s)", bot_key, pid)
+        return None
+    except Exception as exc:
+        return str(exc)
+
+
+def close_all_bot_positions(
+    client,
+    *,
+    positions: Optional[list] = None,
+    bot_keys: Optional[list[str]] = None,
+) -> list[tuple[str, str]]:
+    """Close open demo positions (from cache only). Returns [(label, error), ...]."""
+    import positions_cache
+
+    if bot_keys is not None:
+        errors: list[tuple[str, str]] = []
+        for bot_key in bot_keys:
+            err = close_bot_position(bot_key, client, positions=positions)
+            if err:
+                errors.append((bot_key, err))
+        return errors
+
+    pos_list = positions if positions is not None else positions_cache.get_positions()
+    if not pos_list:
+        return []
+
+    errors: list[tuple[str, str]] = []
+    for p in list(pos_list):
+        pid = p.get("position_id")
+        iid = p.get("instrument_id")
+        if pid is None or iid is None:
+            continue
+        label = str(p.get("instrument_display_name") or p.get("instrument_name") or pid)
+        try:
+            pid_int = int(pid)
+            iid_int = int(iid)
+        except (TypeError, ValueError):
+            errors.append((label, "Invalid position id"))
+            continue
+        rate = float(p.get("current_rate") or p.get("open_rate") or 0)
+        try:
+            client.close_demo_position(pid_int, iid_int)
+            if trade := trade_manager.find_open_by_position_id(pid_int):
+                trade_manager.close_manual(trade.bot_id, rate, rate, client=None, reason="manual")
+            else:
+                trade_manager.clear_position_owner(pid_int)
+            positions_cache.remove_position(pid_int)
+            suppress_adopt(iid_int)
+        except Exception as exc:
+            errors.append((label, str(exc)))
+    return errors
+
+
+def delete_bot(
+    bot_id: str,
+    *,
+    close_position: bool = False,
+    client=None,
+    is_demo: bool = True,
+    positions: Optional[list] = None,
+) -> tuple[bool, str]:
     """Permanently remove a bot from the registry.
 
-    Returns (True, "") on success, or (False, reason) when the bot cannot be
-    deleted because it is still active or owns an open position.
+    When *close_position* is True, turns auto-trade off, closes any open demo
+    position on eToro, then deletes.  Returns (True, "") on success.
     """
     with _lock:
         state = _engines.get(bot_id)
         if state is None:
             return False, "Bot not found."
-        if state.config.trading_active:
-            return False, "Disable auto-trade first."
+        was_active = state.config.trading_active
         iid = state.config.instrument_id
-        if trade_manager.get_open(state.bot_uuid) is not None:
-            return False, "Close the open position first."
-        # Safe — stop and remove
+        bot_uuid = state.bot_uuid
+
+    if was_active:
+        set_auto_trade(iid, False, bot_id=bot_id)
+
+    if close_position:
+        if not is_demo and _bot_has_open_position(bot_id, positions):
+            return False, "Close the open position in eToro first (live account)."
+        if is_demo and client is not None and _bot_has_open_position(bot_id, positions):
+            err = close_bot_position(bot_id, client, positions=positions)
+            if err:
+                return False, f"Could not close position: {err}"
+    elif trade_manager.get_open(bot_uuid) is not None:
+        return False, "Close the open position first."
+
+    with _lock:
+        state = _engines.get(bot_id)
+        if state is None:
+            return False, "Bot not found."
+        iid = state.config.instrument_id
         state.running = False
+        bot_uuid = state.bot_uuid
         del _engines[bot_id]
         _disabled_bots.discard(bot_id)
-        # Re-assign primary for this iid if needed
         if _iid_to_primary.get(iid) == bot_id:
             new_primary = next(
                 (k for k, s in _engines.items() if s.config.instrument_id == iid), None
@@ -1897,7 +2180,7 @@ def delete_bot(bot_id: str) -> tuple[bool, str]:
     market_data_hub.stop(bot_id=bot_id)
     market_data_hub.remove(iid, bot_id=bot_id)
     bot_registry.remove(bot_id)
-    log.info("Bot %s (UUID %s) deleted", bot_id, state.bot_uuid)
+    log.info("Bot %s (UUID %s) deleted", bot_id, bot_uuid)
     return True, ""
 
 
@@ -1913,6 +2196,33 @@ def stop_all() -> None:
     tick_manager.stop_all()
     market_data_hub.stop()
     log.info("All engines stopped")
+
+
+def force_purge_all() -> int:
+    """Stop every bot and unregister all engines (admin reset).
+
+    Call :func:`close_all_bot_positions` first if open trades should be closed.
+    Returns the number of engines removed.
+    """
+    global _fleet_booted, _active_bot_id
+    with _lock:
+        keys = list(_engines.keys())
+    stop_all()
+    import bot_registry
+    for k in keys:
+        try:
+            bot_registry.remove(k)
+        except Exception:
+            pass
+    with _lock:
+        _engines.clear()
+        _iid_to_primary.clear()
+        _disabled_bots.clear()
+        _active_bot_id = None
+    _fleet_booted = False
+    _save_disabled()
+    log.info("Force-purged %d bot engine(s)", len(keys))
+    return len(keys)
 
 
 def configured_instruments() -> dict[str, int]:
@@ -1978,6 +2288,97 @@ def get_snapshot_by_uuid(bot_uuid: str) -> Optional[EngineSnapshot]:
     return None
 
 
+def get_bot_uuid(bot_key: str) -> str:
+    """Stable UUID for a bot — matches engine state and the position-owner map."""
+    with _lock:
+        state = _engines.get(bot_key)
+        if state and state.bot_uuid:
+            return state.bot_uuid
+    return bot_registry.get_or_create(bot_key)
+
+
+def get_open_trade(bot_key: str):
+    """In-memory open trade for a bot (by instruments.toml key)."""
+    return trade_manager.get_open(get_bot_uuid(bot_key))
+
+
+def register_engines_for_owned_positions(
+    client: EToroClient,
+    *,
+    is_demo: bool = True,
+    positions: Optional[list] = None,
+) -> int:
+    """Register stopped engines for bots that own open positions but aren't in fleet.
+
+    After fleet pruning (instruments.toml changes, git restore) many bots can
+    disappear from the configured fleet while their eToro positions and
+    position_owners.json entries survive.  Without registration the Bots tab
+    never lists them and get_bot_uuid() can diverge from the owner map UUID.
+    """
+    if positions is None:
+        try:
+            positions = client.get_open_positions(demo=is_demo)
+        except Exception:
+            log.warning("Could not fetch positions for orphan-engine registration", exc_info=True)
+            return 0
+
+    uuid_to_key = {v: k for k, v in bot_registry.get_all().items()}
+    creds = ("", "")
+    with _lock:
+        for s in _engines.values():
+            if s.client and s.config.api_key:
+                creds = (s.config.api_key, s.config.user_key)
+                break
+
+    registered = 0
+    seen_keys: set[str] = set()
+    for pos in positions:
+        pid = pos.get("position_id")
+        if pid is None:
+            continue
+        owner_uuid = trade_manager.owner_of_position(pid)
+        if not owner_uuid:
+            continue
+        bot_key = uuid_to_key.get(owner_uuid)
+        if not bot_key or bot_key in seen_keys:
+            continue
+        seen_keys.add(bot_key)
+        with _lock:
+            if bot_key in _engines:
+                continue
+        iid = pos.get("instrument_id")
+        if iid is None:
+            continue
+        iid = int(iid)
+        label = pos.get("name") or pos.get("symbol") or str(iid)
+        config = EngineConfig(
+            instrument_id=iid,
+            instrument_label=label,
+            interval_label="(orphan)",
+            interval_seconds=3600,
+            candle_count=100,
+            trading_active=False,
+            demo_amount=float(pos.get("amount") or 1000.0),
+            is_demo=is_demo,
+            api_key=creds[0],
+            user_key=creds[1],
+            strategy_name="llm",
+            bot_id=bot_key,
+        )
+        stopped = _EngineState(config=config, client=client, running=False)
+        stopped.bot_uuid = owner_uuid
+        with _lock:
+            _engines[bot_key] = stopped
+        registered += 1
+        log.info(
+            "Registered orphan engine for %s (owns position #%s on %s)",
+            bot_key, pid, label,
+        )
+    if registered:
+        log.info("Registered %d orphan bot engine(s) for open owned positions", registered)
+    return registered
+
+
 def get_all_snapshots() -> dict[str, EngineSnapshot]:
     """Return snapshots for every running bot (bot_id → EngineSnapshot)."""
     with _lock:
@@ -2021,6 +2422,7 @@ def set_auto_trade(instrument_id: int, active: bool, bot_id: Optional[str] = Non
             else:
                 _disabled_bots.add(key)
     _save_disabled()
+    _invalidate_auto_trade_count_cache()
     if key:
         if active:
             _ensure_engine_thread(key)
@@ -2142,12 +2544,23 @@ def mark_fleet_booted() -> None:
 
 def auto_trade_count() -> int:
     """Bots effectively trading (user ON and market open)."""
+    now = time.monotonic()
+    cached = getattr(auto_trade_count, "_cache", None)
+    if cached and now - cached[0] < 5.0:
+        return cached[1]
     with _lock:
         items = list(_engines.items())
-    return sum(
+    count = sum(
         1 for k, s in items
         if _bot_engine_active(s.config, k) and _market_open_for_state(s)
     )
+    auto_trade_count._cache = (now, count)  # type: ignore[attr-defined]
+    return count
+
+
+def _invalidate_auto_trade_count_cache() -> None:
+    if hasattr(auto_trade_count, "_cache"):
+        del auto_trade_count._cache  # type: ignore[attr-defined]
 
 
 def active_engine_count() -> int:
@@ -2175,6 +2588,7 @@ def set_all_auto_trade(active: bool) -> None:
         else:
             _disabled_bots.update(keys)
     _save_disabled()
+    _invalidate_auto_trade_count_cache()
     for k in keys:
         if active:
             _ensure_engine_thread(k)
@@ -2184,15 +2598,25 @@ def set_all_auto_trade(active: bool) -> None:
 
 
 def restore_auto_trade(active: bool) -> None:
-    """Boot-time restore that RESPECTS the persisted per-bot OFF set.
+    """Boot-time restore: per-bot auto_trade from TOML + persisted OFF set.
 
-    Used instead of set_all_auto_trade(True) at startup so a bot the user
-    individually turned off (and which we persisted) stays off across restarts,
-    even when the session's global auto-trade flag was on."""
+    Bots with ``auto_trade = true`` in instruments.toml stay ON across restarts
+    even when the session global flag was OFF.  The global flag still enables
+    bots that have no explicit TOML preference (legacy default OFF).  Per-bot
+    disables in disabled_bots.json are always honored.
+    """
     with _lock:
         items = list(_engines.items())
+    on_count = 0
     for k, _ in items:
-        on = active and (k not in _disabled_bots)
+        desired = False
+        with _lock:
+            s = _engines.get(k)
+            if s:
+                desired = bool(s.config.trading_active)
+        if not desired and active:
+            desired = True
+        on = desired and (k not in _disabled_bots)
         was = False
         with _lock:
             s = _engines.get(k)
@@ -2205,10 +2629,114 @@ def restore_auto_trade(active: bool) -> None:
             _ensure_engine_thread(k)
         elif not on and was:
             stop_bot(k)
+        if on:
+            on_count += 1
     log.info(
-        "Boot restore: auto-trade=%s, honoring %d persisted-OFF bot(s) %s",
-        active, len(_disabled_bots), sorted(_disabled_bots),
+        "Boot restore: global=%s, %d bot(s) ON, honoring %d persisted-OFF bot(s) %s",
+        active, on_count, len(_disabled_bots), sorted(_disabled_bots),
     )
+
+
+def relink_owned_positions(*, positions: Optional[list] = None) -> int:
+    """Re-hydrate in-memory trades from persisted position owners.
+
+    Idempotent — safe to call on boot and periodically from the Bots tab.  Only
+    adopts bots that have a persisted owner on an open eToro position but no
+    entry in trade_manager._open yet (e.g. after restart, or if adoption was
+    missed because the engine thread was idle).
+    """
+    with _lock:
+        if not _fleet_booted:
+            return 0
+        uuid_index = {
+            s.bot_uuid: (bot_key, s)
+            for bot_key, s in _engines.items()
+            if getattr(s, "bot_uuid", None)
+        }
+        client = None
+        is_demo = True
+        for s in _engines.values():
+            if s.client:
+                client = s.client
+                is_demo = bool(s.config.is_demo)
+                break
+    if not client:
+        return 0
+
+    if positions is None:
+        try:
+            positions = client.get_open_positions(demo=is_demo)
+        except Exception:
+            log.warning("Position relink: could not fetch open positions", exc_info=True)
+            return 0
+
+    register_engines_for_owned_positions(client, is_demo=is_demo, positions=positions)
+
+    if trade_manager.count_bots_needing_relink(positions) == 0:
+        return 0
+
+    adopted = 0
+    owned_open = 0
+    for pos in positions:
+        pid = pos.get("position_id")
+        if pid is None:
+            continue
+        owner_uuid = trade_manager.owner_of_position(pid)
+        if not owner_uuid:
+            continue
+        owned_open += 1
+        if trade_manager.has_open(owner_uuid):
+            continue
+
+        eng = uuid_index.get(owner_uuid)
+        if eng:
+            _, state = eng
+            strategy = state.config.strategy_name
+            label = state.config.instrument_label
+            iid = pos.get("instrument_id") or state.config.instrument_id
+        else:
+            strategy = ""
+            iid = pos.get("instrument_id")
+            label = pos.get("symbol") or pos.get("name") or str(iid or "?")
+        if iid is None:
+            log.warning(
+                "Position relink: skip #%s — no instrument_id (owner=%s)",
+                pid, owner_uuid[:8],
+            )
+            continue
+        iid = int(iid)
+
+        ask = pos.get("current_rate") or pos.get("open_rate")
+        bid = pos.get("current_rate") or pos.get("open_rate")
+        if ask is None or bid is None:
+            try:
+                rates = (client.get_rates([iid]) or {}).get("rates") or []
+                if rates:
+                    ask = rates[0].get("ask") or ask
+                    bid = rates[0].get("bid") or bid
+            except Exception:
+                pass
+        ask = float(ask or pos.get("open_rate") or 1.0)
+        bid = float(bid or pos.get("open_rate") or ask)
+
+        if trade_manager.adopt_etoro_position(
+            iid, label, pos, ask, bid,
+            bot_id=owner_uuid,
+            strategy=strategy,
+        ):
+            adopted += 1
+
+    if adopted:
+        log.info(
+            "Position relink: adopted %d/%d owned open position(s) (%d total on eToro)",
+            adopted, owned_open, len(positions),
+        )
+    return adopted
+
+
+def relink_owned_positions_on_boot() -> int:
+    """Boot-time alias for relink_owned_positions (kept for call-site clarity)."""
+    return relink_owned_positions()
 
 
 def suppress_adopt(instrument_id: int, seconds: float = ADOPT_SUPPRESS_SEC, bot_id: Optional[str] = None) -> None:

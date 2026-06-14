@@ -368,11 +368,60 @@ def _clear_owner(position_id) -> None:
             _save_owners()
 
 
+def clear_position_owner(position_id) -> None:
+    """Drop owner-map entry after an external close (e.g. bot delete)."""
+    _clear_owner(position_id)
+    _mark_recently_closed(position_id)
+
+
+def clear_all_position_owners() -> int:
+    """Wipe the persisted owner map (fleet reset). Returns entries cleared."""
+    with _owner_file_lock:
+        n = len(_position_owner)
+        if not n:
+            return 0
+        _position_owner.clear()
+        _save_owners()
+        return n
+
+
 def owner_of_position(position_id) -> Optional[str]:
     """Bot UUID that owns this eToro position, or None (manual / unknown)."""
     if position_id is None:
         return None
     return _position_owner.get(str(position_id))
+
+
+def owned_position_id(bot_uuid: str) -> Optional[int]:
+    """First open position id attributed to this bot in the persisted owner map."""
+    if not bot_uuid:
+        return None
+    with _owner_file_lock:
+        items = list(_position_owner.items())
+    for pid, owner in items:
+        if owner == bot_uuid:
+            try:
+                return int(pid)
+            except (TypeError, ValueError):
+                continue
+    return None
+
+
+def count_bots_needing_relink(positions: list[dict]) -> int:
+    """Bots with a persisted owner on an open position but no in-memory trade."""
+    seen: set[str] = set()
+    missing = 0
+    for pos in positions:
+        pid = pos.get("position_id")
+        if pid is None:
+            continue
+        uid = owner_of_position(pid)
+        if not uid or uid in seen:
+            continue
+        seen.add(uid)
+        if not has_open(uid):
+            missing += 1
+    return missing
 
 
 # ── Open-lineage map (partial-close attribution) ─────────────────────────────

@@ -1330,3 +1330,205 @@ demo_amount        = 1000.0
 enabled            = true
 auto_trade         = true
 strategy           = "daviddtech"
+
+# ── Re-added bots (open positions survived fleet config changes) ─────────────
+# auto_trade=false: user turns ON from Bots tab when ready.  Fleet optimization
+# may flag weak OOS — positions are never auto-closed; see fleet_advisory.py.
+
+[instruments.ada_ichimoku]
+label              = "Cardano  (ADA)"
+instrument_id      = 0
+interval           = "1 Minute"
+interval_secs      = 60
+candle_count       = 300
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = false
+strategy           = "ichimoku"
+
+[instruments.ada_orb]
+label              = "Cardano  (ADA)"
+instrument_id      = 0
+interval           = "1 Minute"
+interval_secs      = 60
+candle_count       = 300
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = false
+strategy           = "orb"
+
+[instruments.btc_donchian_1h]
+label              = "Bitcoin  (BTC)"
+instrument_id      = 0
+interval           = "1 Hour"
+interval_secs      = 3600
+candle_count       = 200
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = false
+strategy           = "donchian"
+
+[instruments.btc_mean_reversion_30m]
+label              = "Bitcoin  (BTC)"
+instrument_id      = 0
+interval           = "30 Minutes"
+interval_secs      = 1800
+candle_count       = 200
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = false
+strategy           = "mean_reversion"
+
+[instruments.doge_ichimoku]
+label              = "Dogecoin  (DOGE)"
+instrument_id      = 0
+interval           = "1 Minute"
+interval_secs      = 60
+candle_count       = 300
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = false
+strategy           = "ichimoku"
+
+[instruments.doge_ichimoku_30m]
+label              = "Dogecoin  (DOGE)"
+instrument_id      = 0
+interval           = "30 Minutes"
+interval_secs      = 1800
+candle_count       = 200
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = false
+strategy           = "ichimoku"
+
+[instruments.doge_orb]
+label              = "Dogecoin  (DOGE)"
+instrument_id      = 0
+interval           = "1 Minute"
+interval_secs      = 60
+candle_count       = 300
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = false
+strategy           = "orb"
+
+[instruments.doge_rsi_30m]
+label              = "Dogecoin  (DOGE)"
+instrument_id      = 0
+interval           = "30 Minutes"
+interval_secs      = 1800
+candle_count       = 200
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = false
+strategy           = "rsi"
+
+[instruments.doge_stat_arb_15m]
+label              = "Dogecoin  (DOGE)"
+instrument_id      = 0
+interval           = "15 Minutes"
+interval_secs      = 900
+candle_count       = 200
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = false
+strategy           = "stat_arb"
+
+[instruments.eth_ichimoku]
+label              = "Ethereum  (ETH)"
+instrument_id      = 0
+interval           = "1 Minute"
+interval_secs      = 60
+candle_count       = 300
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = false
+strategy           = "ichimoku"
+
+[instruments.eth_orb]
+label              = "Ethereum  (ETH)"
+instrument_id      = 0
+interval           = "1 Minute"
+interval_secs      = 60
+candle_count       = 300
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = false
+strategy           = "orb"
+
+[instruments.sol_candlestick_15m]
+label              = "Solana  (SOL)"
+instrument_id      = 0
+interval           = "15 Minutes"
+interval_secs      = 900
+candle_count       = 200
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = false
+strategy           = "candlestick"
+
+[instruments.sol_ichimoku]
+label              = "Solana  (SOL)"
+instrument_id      = 0
+interval           = "1 Minute"
+interval_secs      = 60
+candle_count       = 300
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = false
+strategy           = "ichimoku"
+
+[instruments.sol_ichimoku_30m]
+label              = "Solana  (SOL)"
+instrument_id      = 0
+interval           = "30 Minutes"
+interval_secs      = 1800
+candle_count       = 200
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = false
+strategy           = "ichimoku"
+
+[instruments.sol_mean_reversion_30m]
+label              = "Solana  (SOL)"
+instrument_id      = 0
+interval           = "30 Minutes"
+interval_secs      = 1800
+candle_count       = 200
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = false
+strategy           = "mean_reversion"
+
+[instruments.sol_orb]
+label              = "Solana  (SOL)"
+instrument_id      = 0
+interval           = "1 Minute"
+interval_secs      = 60
+candle_count       = 300
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = false
+strategy           = "orb"
+
+[instruments.sol_rsi]
+label              = "Solana  (SOL)"
+instrument_id      = 0
+interval           = "1 Minute"
+interval_secs      = 60
+candle_count       = 300
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = false
+strategy           = "rsi"
+
+[instruments.sol_stat_arb_15m]
+label              = "Solana  (SOL)"
+instrument_id      = 0
+interval           = "15 Minutes"
+interval_secs      = 900
+candle_count       = 200
+demo_amount        = 1000.0
+enabled            = true
+auto_trade         = false
+strategy           = "stat_arb"

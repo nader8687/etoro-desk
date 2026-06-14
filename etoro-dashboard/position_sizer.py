@@ -297,13 +297,7 @@ def edge_multiplier(bot_key: str) -> float:
             return 1.0
         import strategies as strategies_mod
         names = strategies_mod.display_names()
-        sd, asset = names.get(spec.strategy, spec.strategy), spec.label.split()[0]
-        row = next(
-            (r for r in _fleet_rows()
-             if r.get("Status") == "ok" and r.get("Strategy") == sd
-             and r.get("Asset") == asset and r.get("Interval") == spec.interval),
-            None,
-        )
+        row = instrument_config.fleet_row_for_spec(_fleet_rows(), spec, names)
         mult = 1.0
         if row:
             pf, n = float(row.get("OOS PF") or 0), int(row.get("OOS n") or 0)

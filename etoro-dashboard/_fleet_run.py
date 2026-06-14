@@ -84,9 +84,28 @@ def main():
         if df is None or len(df) < sp.candle_count + 50:
             _finish(_pk, "skip", (*name, "no history"))
             continue
+        import instrument_config
+        ltf_dfs: dict[int, object] = {}
+        for ci in instrument_config.check_in_options(sp.interval_secs):
+            if ci >= sp.interval_secs:
+                continue
+            ldkey = (sp.label, ci)
+            if ldkey not in dfs:
+                try:
+                    dfs[ldkey] = c.get_hist_candles(IIDS[sp.label], ci, 1000)
+                except Exception:
+                    dfs[ldkey] = None
+            ldf = dfs[ldkey]
+            if ldf is not None and len(ldf) >= 50:
+                ltf_dfs[ci] = ldf
+        exit_variants = backtester.prepare_exit_check_variants(
+            df, sp.strategy, IIDS[sp.label], sp.interval_secs,
+            window_bars=sp.candle_count, ltf_dfs=ltf_dfs,
+        )
         sweep = backtester.optimize_exits(
             df, sp.strategy, sp.label, IIDS[sp.label], sp.interval_secs,
             min_is_trades=8, window_bars=sp.candle_count,
+            exit_variants=exit_variants or None,
         )
         if not sweep:
             _finish(_pk, "skip", (*name, "not replayable"))
@@ -97,17 +116,22 @@ def main():
             continue
         best = max(valid, key=lambda r: (
             99.0 if r["oos"]["pf"] == float("inf") else r["oos"]["pf"], r["oos"]["pnl"]))
+        win_ci = int(best.get("check_in_secs", sp.interval_secs))
+        ctx = (sweep.get("exit_variants") or {}).get(win_ci) or {
+            "df": df, "signals": sweep["signals"], "exit_rev_by_bar": None,
+        }
         res = backtester.simulate_exits(
-            df, sweep["signals"], sp.strategy, sp.label, sp.interval_secs,
+            ctx["df"], ctx["signals"], sp.strategy, sp.label, sp.interval_secs,
             stop_mult=best["stop_mult"], trail_mult=best["trail_mult"],
             tp_pct=best["tp_pct"], min_conf=int(best.get("min_conf", 0)),
             window_bars=sp.candle_count,
+            exit_rev_by_bar=ctx.get("exit_rev_by_bar"),
         )
         s = res.summary()
         oospf = 99.0 if best["oos"]["pf"] == float("inf") else best["oos"]["pf"]
         _finish(_pk, "row", (*name, best["stop_mult"], best["trail_mult"], best["tp_pct"],
                              s["n"], s["win_rate"] * 100, s["pnl"], s["max_dd"],
-                             oospf, best["oos"]["n"], int(best.get("min_conf", 0))))
+                             oospf, best["oos"]["n"], int(best.get("min_conf", 0)), win_ci))
         print("done:", name, flush=True)
 
     rows.sort(key=lambda r: r[8], reverse=True)
@@ -130,15 +154,14 @@ def main():
     out = []
     for r in rows:
         secs = int(r[2].rstrip("m")) * 60
+        check_secs = int(r[13]) if len(r) > 13 else secs
         out.append({
             "Strategy": names.get(r[0], r[0]), "Asset": r[1],
             "Interval": ivl_label.get(secs, r[2]), "Status": "ok",
             "Stop ×ATR": r[3], "Trail ×ATR": r[4], "TP %": r[5],
             "Min conf": r[12],
-            # Exit check-in interval — default = trade interval (no-op today).
-            # Becomes a swept value once the candle archive holds enough finer-TF
-            # history to optimize it without surfacing noise (see _exitcheck_study).
-            "Check-in": ivl_label.get(secs, r[2]),
+            "Check-in": ivl_label.get(check_secs, f"{check_secs // 60}m"),
+            "check_in_secs": check_secs,
             "Trades": r[6], "Win %": round(r[7], 1), "P&L $": r[8],
             "Max DD $": r[9], "OOS PF": r[10], "OOS n": r[11],
         })

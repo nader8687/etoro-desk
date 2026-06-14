@@ -550,6 +550,99 @@ def simulate_exits(
     return result
 
 
+def prepare_exit_check_variants(
+    htf_df: pd.DataFrame,
+    strategy_key: str,
+    instrument_id: int,
+    interval_secs: int,
+    *,
+    spread_pct: float = 0.05,
+    window_bars: int = 0,
+    ltf_dfs: Optional[dict[int, pd.DataFrame]] = None,
+) -> dict[int, dict]:
+    """Per-check-in contexts for optimize_exits — interval, ½, and ¼ (snapped).
+
+    Keys are check-in seconds.  Each value has df, signals, and exit_rev_by_bar
+    (None when check-in equals the trade interval).  Missing LTF history falls
+    back to the single-timeframe path for that candidate."""
+    import instrument_config as ic
+
+    ltf_dfs = ltf_dfs or {}
+    options = ic.check_in_options(interval_secs)
+    base_signals = compute_signal_series(
+        htf_df, strategy_key, instrument_id, spread_pct, window_bars=window_bars,
+    )
+    if base_signals is None:
+        return {}
+
+    out: dict[int, dict] = {}
+    for ci in options:
+        if ci >= interval_secs:
+            out[ci] = {
+                "df": htf_df,
+                "signals": base_signals,
+                "exit_rev_by_bar": None,
+                "mtf": False,
+            }
+            continue
+        ltf_df = ltf_dfs.get(ci)
+        if ltf_df is None or ltf_df.empty or len(ltf_df) < 50:
+            log.debug(
+                "check-in %ds skipped for %s/%s — no LTF history",
+                ci, strategy_key, instrument_id,
+            )
+            continue
+        htf = htf_df.copy()
+        lt = ltf_df.copy()
+        htf["time"] = pd.to_datetime(htf["time"], utc=True)
+        lt["time"] = pd.to_datetime(lt["time"], utc=True)
+        htf = htf[htf["time"] >= lt["time"].iloc[0]].reset_index(drop=True)
+        # Shorter LTF history clips HTF — shrink the signal window instead of
+        # silently duplicating the trade-interval path (which made ¼ look "tested"
+        # but replay identically to the full interval).
+        eff_win = min(
+            int(window_bars) if window_bars else 0,
+            max(50, len(htf) - WARMUP_BARS - 10),
+        ) if window_bars else 0
+        need = max(WARMUP_BARS, eff_win) + 30
+        if len(htf) < need:
+            log.debug(
+                "check-in %ds skipped for %s/%s — clipped HTF %d bars < need %d",
+                ci, strategy_key, instrument_id, len(htf), need,
+            )
+            continue
+        hsig = compute_signal_series(
+            htf, strategy_key, instrument_id, spread_pct, window_bars=eff_win or window_bars,
+        )
+        lsig = compute_signal_series(
+            lt, strategy_key, instrument_id, spread_pct, window_bars=eff_win or window_bars,
+        )
+        if hsig is None or lsig is None:
+            log.debug(
+                "check-in %ds skipped for %s/%s — signal series failed",
+                ci, strategy_key, instrument_id,
+            )
+            continue
+        out[ci] = {
+            "df": htf,
+            "signals": hsig,
+            "exit_rev_by_bar": build_exit_rev_by_bar(htf, lt, lsig),
+            "mtf": True,
+            "window_bars": eff_win or window_bars,
+        }
+    if not out:
+        return {}
+    # Always include the trade-interval path when faster options were requested.
+    if interval_secs not in out:
+        out[interval_secs] = {
+            "df": htf_df,
+            "signals": base_signals,
+            "exit_rev_by_bar": None,
+            "mtf": False,
+        }
+    return out
+
+
 def build_exit_rev_by_bar(htf_df: pd.DataFrame, ltf_df: pd.DataFrame,
                           ltf_signals: list) -> list:
     """Map each interval (HTF) bar to the closed lower-timeframe bars that fall
@@ -594,40 +687,66 @@ def optimize_exits(
     min_is_trades: int = 8,
     window_bars: int = 0,
     progress_cb=None,
+    exit_variants: Optional[dict[int, dict]] = None,
 ) -> Optional[dict]:
     """Sweep the exit grid over ONE cached signal series.
+
+    When *exit_variants* is supplied (from prepare_exit_check_variants), each
+    combo is replayed at every check-in candidate (trade interval, ½, ¼ — snapped
+    to supported candles).  Otherwise only the trade-interval path runs.
 
     Returns {"rows": [...], "signals_n": int} where each row carries the params
     plus IN-SAMPLE (first 70%) and OUT-OF-SAMPLE (last 30%) summaries.  Rows
     with fewer than min_is_trades in-sample trades are marked excluded — too
     little evidence to mean anything."""
-    signals = compute_signal_series(
-        df, strategy_key, instrument_id, spread_pct,
-        window_bars=window_bars,
-        progress_cb=(lambda f: progress_cb(f * 0.5)) if progress_cb else None,
-    )
+    if exit_variants is None:
+        signals = compute_signal_series(
+            df, strategy_key, instrument_id, spread_pct,
+            window_bars=window_bars,
+            progress_cb=(lambda f: progress_cb(f * 0.5)) if progress_cb else None,
+        )
+        if signals is None:
+            return None
+        exit_variants = {
+            interval_secs: {"df": df, "signals": signals, "exit_rev_by_bar": None},
+        }
+    elif progress_cb:
+        progress_cb(0.5)
+
+    base_ctx = exit_variants.get(interval_secs) or next(iter(exit_variants.values()))
+    signals = base_ctx["signals"]
     if signals is None:
         return None
+
     combos = [
         (sm, tm, tp, mc)
         for sm in stop_mults for tm in trail_mults
         for tp in tp_pcts for mc in min_confs
     ]
+    ci_options = sorted(exit_variants.keys(), reverse=True)
+    total_steps = max(1, len(combos) * len(ci_options))
     rows = []
-    for c_i, (sm, tm, tp, mc) in enumerate(combos):
-        if progress_cb and c_i % 10 == 0:
-            progress_cb(0.5 + 0.5 * c_i / len(combos))
-        res = simulate_exits(
-            df, signals, strategy_key, instrument_label, interval_secs,
-            stop_mult=sm, trail_mult=tm, tp_pct=tp, min_conf=mc,
-            amount=amount, spread_pct=spread_pct, window_bars=window_bars,
-        )
-        ins, oos = res.oos_split()
-        rows.append({
-            "stop_mult": sm, "trail_mult": tm, "tp_pct": tp, "min_conf": mc,
-            "is": ins, "oos": oos,
-            "excluded": ins["n"] < min_is_trades,
-        })
+    step = 0
+    for sm, tm, tp, mc in combos:
+        for ci in ci_options:
+            ctx = exit_variants[ci]
+            if progress_cb and step % 10 == 0:
+                progress_cb(0.5 + 0.5 * step / total_steps)
+            res = simulate_exits(
+                ctx["df"], ctx["signals"], strategy_key, instrument_label, interval_secs,
+                stop_mult=sm, trail_mult=tm, tp_pct=tp, min_conf=mc,
+                amount=amount, spread_pct=spread_pct,
+                window_bars=ctx.get("window_bars", window_bars),
+                exit_rev_by_bar=ctx.get("exit_rev_by_bar"),
+            )
+            ins, oos = res.oos_split()
+            rows.append({
+                "stop_mult": sm, "trail_mult": tm, "tp_pct": tp, "min_conf": mc,
+                "check_in_secs": ci,
+                "is": ins, "oos": oos,
+                "excluded": ins["n"] < min_is_trades,
+            })
+            step += 1
     if progress_cb:
         progress_cb(1.0)
     return {
@@ -636,4 +755,5 @@ def optimize_exits(
         # Cached series so the caller can instantly replay ANY combo in full
         # (e.g. to chart the best parameters' trades) without recomputing.
         "signals": signals,
+        "exit_variants": exit_variants,
     }

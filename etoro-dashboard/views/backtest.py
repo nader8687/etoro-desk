@@ -165,6 +165,11 @@ def _save_fleet(rows: list, *, meta: dict | None = None) -> None:
             payload["meta"] = meta
         with open(_FLEET_PATH, "w", encoding="utf-8") as f:
             json.dump(payload, f)
+        try:
+            import fleet_advisory
+            fleet_advisory.rebuild_advisories()
+        except Exception:
+            pass
     except Exception:
         pass
 
@@ -274,11 +279,15 @@ def _render_fleet_optimization(
     """Fleet exit sweep — always rendered below single-strategy backtest charts."""
     with st.expander("🏁 Fleet optimization — best exit parameters for EVERY plan, ranked by P&L"):
         st.caption(
-            "Sweeps the 196-combo exit grid for every configured (strategy × asset "
+            "Sweeps the 196-combo exit grid for every (strategy × asset "
             "× interval) plan at its live window size, replays each plan's best "
             "out-of-sample combo over the chosen window, and ranks the results by "
-            "P&L.  Optionally clip to a date range (same as single backtest).  "
-            "Takes a few minutes — one full signal replay per plan."
+            "P&L.  Default assets are the diversification set (BTC, XRP, TSLA, "
+            "NVDA, Gold, …) — add more in the multiselect.  Exit **check-in** is "
+            "also swept: trade interval, ½, and ¼ "
+            "(each snapped to the nearest supported candle).  Optionally clip to "
+            "a date range (same as single backtest).  Takes a few minutes — one "
+            "full signal replay per plan × check-in candidate."
         )
         fl_assets = st.multiselect(
             "Assets", sorted(instruments.keys()), default=sorted(instruments.keys()),
@@ -348,11 +357,12 @@ def _render_fleet_optimization(
                 os.environ.get("ETORO_API_KEY", ""), os.environ.get("ETORO_USER_KEY", ""),
             )
             sec_to_label = {v: k for k, v in _INTERVALS.items()}
+            import instrument_config
             dfs_cache: dict = {}
             fleet_rows = []
             fprog = st.progress(0.0, text="Starting fleet sweep…")
             for p_i, sp in enumerate(plans):
-                ivl = sec_to_label.get(sp.interval_secs, f"{sp.interval_secs // 60}m")
+                ivl = instrument_config.interval_label_for_secs(sp.interval_secs)
                 fprog.progress(p_i / max(1, len(plans)),
                                text=f"{sp.strategy} · {sp.label.split()[0]} · {ivl} "
                                     f"({p_i + 1}/{len(plans)})")
@@ -381,7 +391,9 @@ def _render_fleet_optimization(
                         dfs_cache[dkey] = (None, "fetch failed")
                 fdf, clip_err = dfs_cache[dkey]
                 base = {"Strategy": names.get(sp.strategy, sp.strategy),
-                        "Asset": sp.label.split()[0], "Interval": ivl}
+                        "Asset": instrument_config.asset_short_for_label(sp.label) or sp.label.split()[0],
+                        "Interval": ivl,
+                        "Label": sp.label}
                 if clip_err:
                     fleet_rows.append({**base, "Status": clip_err})
                     continue
@@ -396,10 +408,42 @@ def _render_fleet_optimization(
                         ),
                     })
                     continue
+                import instrument_config
+                ltf_dfs: dict[int, pd.DataFrame] = {}
+                for ci in instrument_config.check_in_options(sp.interval_secs):
+                    if ci >= sp.interval_secs:
+                        continue
+                    lkey = (sp.label, ci)
+                    if lkey not in dfs_cache:
+                        try:
+                            lraw = client.get_hist_candles(
+                                instruments[sp.label], ci, _fl_candles,
+                            )
+                            try:
+                                import candle_archive
+                                lraw = candle_archive.load_merged(
+                                    instruments[sp.label], ci, lraw,
+                                )
+                            except Exception:
+                                pass
+                            if _fl_use and lraw is not None and not lraw.empty:
+                                lraw, _ = _clip_candles_to_range(lraw, _fl_from, _fl_to)
+                            dfs_cache[lkey] = (lraw, None)
+                        except Exception:
+                            dfs_cache[lkey] = (None, "fetch failed")
+                    ldf, _ = dfs_cache[lkey]
+                    if ldf is not None and not ldf.empty:
+                        ltf_dfs[ci] = ldf
+                exit_variants = backtester.prepare_exit_check_variants(
+                    fdf, sp.strategy, instruments[sp.label], sp.interval_secs,
+                    spread_pct=float(spread_pct), window_bars=sp.candle_count,
+                    ltf_dfs=ltf_dfs,
+                )
                 sweep = backtester.optimize_exits(
                     fdf, sp.strategy, sp.label, instruments[sp.label], sp.interval_secs,
                     amount=float(amount), spread_pct=float(spread_pct),
                     min_is_trades=8, window_bars=sp.candle_count,
+                    exit_variants=exit_variants or None,
                 )
                 if not sweep:
                     fleet_rows.append({**base, "Status": "not replayable"})
@@ -411,28 +455,38 @@ def _render_fleet_optimization(
                 fbest = max(fvalid, key=lambda r: (
                     99.0 if r["oos"]["pf"] == float("inf") else r["oos"]["pf"],
                     r["oos"]["pnl"]))
+                win_ci = int(fbest.get("check_in_secs", sp.interval_secs))
+                ctx = (sweep.get("exit_variants") or {}).get(win_ci) or {
+                    "df": fdf, "signals": sweep["signals"], "exit_rev_by_bar": None,
+                }
                 fres = backtester.simulate_exits(
-                    fdf, sweep["signals"], sp.strategy, sp.label, sp.interval_secs,
+                    ctx["df"], ctx["signals"], sp.strategy, sp.label, sp.interval_secs,
                     stop_mult=fbest["stop_mult"], trail_mult=fbest["trail_mult"],
                     tp_pct=fbest["tp_pct"], min_conf=int(fbest.get("min_conf", 0)),
                     amount=float(amount), spread_pct=float(spread_pct),
-                    window_bars=sp.candle_count,
+                    window_bars=ctx.get("window_bars", sp.candle_count),
+                    exit_rev_by_bar=ctx.get("exit_rev_by_bar"),
                 )
                 fs = fres.summary()
+                check_in_lbl = instrument_config.interval_label_for_secs(win_ci)
+                _mtf_tested = [
+                    instrument_config.interval_label_for_secs(ci)
+                    for ci, c in sorted(exit_variants.items())
+                    if c.get("mtf")
+                ]
                 fleet_rows.append({
                     **base, "Status": "ok",
                     "Stop ×ATR": fbest["stop_mult"], "Trail ×ATR": fbest["trail_mult"],
                     "TP %": fbest["tp_pct"], "Min conf": int(fbest.get("min_conf", 0)),
-                    # Exit check-in interval.  Default = the trade interval (= today's
-                    # behaviour: signal-reversal exit re-checked once per candle).
-                    # The interactive sweep doesn't optimize it (finer-TF history is
-                    # data-starved; see _exitcheck_study) — it's swept in the deep
-                    # CLI run once the candle archive is deep enough.
-                    "Check-in": ivl,
+                    "Check-in": check_in_lbl,
+                    "Check-in MTF": "yes" if ctx.get("mtf") else "no",
+                    "MTF options tested": ", ".join(_mtf_tested) if _mtf_tested else "—",
+                    "check_in_secs": win_ci,
                     "Trades": fs["n"], "Win %": round(fs["win_rate"] * 100, 1),
                     "P&L $": fs["pnl"], "Max DD $": fs["max_dd"],
                     "OOS PF": 99.0 if fbest["oos"]["pf"] == float("inf") else fbest["oos"]["pf"],
                     "OOS n": fbest["oos"]["n"],
+                    "OOS P&L $": round(fbest["oos"]["pnl"], 2),
                 })
             fprog.progress(1.0, text="Done")
             st.session_state["bt_fleet"] = fleet_rows
@@ -530,7 +584,7 @@ def _render_fleet_optimization(
                 )
                 if filtered:
                     ftable = (pd.DataFrame(filtered)
-                              .drop(columns=["Status"])
+                              .drop(columns=["Status", "check_in_secs"], errors="ignore")
                               .sort_values("P&L $", ascending=False)
                               .reset_index(drop=True))
                     # Backfill Check-in for rows saved before the column existed:
@@ -609,6 +663,9 @@ def _render_fleet_optimization(
 
 
 def render() -> None:
+    import os
+    import instrument_config
+
     st.subheader("Backtest this strategy")
     st.caption(
         "Replays the strategy selected in the **Strategy Reference above** over "
@@ -616,9 +673,12 @@ def render() -> None:
         "and your current Settings exits (2×ATR stop, chandelier trail, TP)."
     )
 
-    instruments = trading_engine.configured_instruments()
+    _ak = os.environ.get("ETORO_API_KEY", "").strip()
+    _uk = os.environ.get("ETORO_USER_KEY", "").strip()
+    fleet_instruments = instrument_config.fleet_sweep_instruments(_ak, _uk)
+    instruments = trading_engine.configured_instruments() or fleet_instruments
     if not instruments:
-        st.info("No configured instruments yet — start the engines first.")
+        st.info("Could not load instruments — check eToro API keys.")
         return
 
     keys = _rule_strategy_keys()
@@ -811,4 +871,4 @@ def render() -> None:
             )
 
     # ── Fleet optimization — always available below the single backtest ───────
-    _render_fleet_optimization(instruments, names, float(amount), float(spread_pct))
+    _render_fleet_optimization(fleet_instruments, names, float(amount), float(spread_pct))

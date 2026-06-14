@@ -29,6 +29,7 @@ services:
       - VISUAL_BOT_URL=http://visual-bot:8080
       - DASHBOARD_HEALTH_PORT=8502
       - SIGNAL_LOG_PATH=/app/data/signal_log.jsonl
+      - SIGNAL_EXEC_PATH=/app/data/signal_execution.json
       - ETORO_RUNTIME_STATE=/app/data/etoro_runtime.json
       # Trade journal (Performance & Lessons tab + LLM memory) — MUST live on the
       # persistent volume, otherwise it defaults to /tmp and is wiped on every
@@ -39,6 +40,9 @@ services:
       - DISABLED_BOTS_PATH=/app/data/disabled_bots.json
       - POSITION_OWNERS_PATH=/app/data/position_owners.json
       - USER_SETTINGS_PATH=/app/data/user_settings.json
+      # Bot fleet config — MUST live on the data volume; otherwise every
+      # `docker compose up --build` restores the bundled instruments.toml.
+      - INSTRUMENTS_CONFIG_PATH=/app/data/instruments.toml
     volumes:
       - etoro-data:/app/data
     networks:

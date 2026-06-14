@@ -96,3 +96,15 @@ def remove(bot_key: str) -> None:
         if bot_key in _cache:
             del _cache[bot_key]
             _save()
+
+
+def remove_all() -> int:
+    """Drop every bot UUID (fresh fleet reset). Returns entries removed."""
+    with _lock:
+        n = len(_cache)
+        if not n:
+            return 0
+        _cache.clear()
+        _save()
+        log.info("Bot registry cleared (%d entries)", n)
+        return n

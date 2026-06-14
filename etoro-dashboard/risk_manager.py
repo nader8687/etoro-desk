@@ -48,7 +48,9 @@ from typing import Optional
 
 log = logging.getLogger(__name__)
 
-CONFIG_PATH = Path(__file__).parent / "instruments.toml"
+import instrument_config
+
+CONFIG_PATH = instrument_config.CONFIG_PATH
 
 
 # ── Tunable limits (conservative defaults; override in instruments.toml [risk]) ─
@@ -90,6 +92,7 @@ def load_limits() -> RiskLimits:
     a config without a [risk] section behaves exactly as the defaults intend.
     """
     global _cached_limits, _cached_mtime
+    instrument_config.ensure_config_file()
     try:
         mtime = CONFIG_PATH.stat().st_mtime
     except OSError:

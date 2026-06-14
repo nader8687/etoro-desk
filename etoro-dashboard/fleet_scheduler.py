@@ -59,6 +59,29 @@ def _tp_same_bucket(a: float, b: float) -> bool:
     return (a or 0) > 0 and (b or 0) > 0 and abs(a - b) <= 0.6
 
 
+def _check_in_secs_from_row(row: dict, trade_interval_secs: int) -> int:
+    """Resolve check-in seconds from a fleet row (new or legacy)."""
+    import instrument_config
+
+    raw = row.get("check_in_secs")
+    if raw is not None:
+        try:
+            ci = int(raw)
+            if ci > 0:
+                return instrument_config.nearest_interval_secs(
+                    ci, max_secs=int(trade_interval_secs),
+                )
+        except (TypeError, ValueError):
+            pass
+    lbl = (row.get("Check-in") or row.get("Interval") or "").strip()
+    inv = {v: k for k, v in instrument_config._INTERVAL_LABELS.items()}
+    if lbl in inv:
+        return instrument_config.nearest_interval_secs(
+            inv[lbl], max_secs=int(trade_interval_secs),
+        )
+    return int(trade_interval_secs)
+
+
 def apply_with_stability_gate() -> dict:
     """Map the saved fleet table onto ON bots' overrides, stability-gated.
     Returns the report dict (also persisted into the state file)."""
@@ -79,12 +102,7 @@ def apply_with_stability_gate() -> dict:
     applied, held, skipped = [], [], []
 
     def row_for(spec):
-        sd, asset = names.get(spec.strategy, spec.strategy), spec.label.split()[0]
-        for r in table:
-            if (r.get("Status") == "ok" and r["Strategy"] == sd
-                    and r["Asset"] == asset and r["Interval"] == spec.interval):
-                return r
-        return None
+        return instrument_config.fleet_row_for_spec(table, spec, names)
 
     for spec in instrument_config.load_specs():
         if spec.key in disabled:
@@ -100,6 +118,7 @@ def apply_with_stability_gate() -> dict:
             "atr_stop_mult": float(r["Stop ×ATR"]),
             "atr_trail_mult": float(r["Trail ×ATR"]),
             "take_profit_pct": float(r["TP %"]),
+            "check_in_secs": _check_in_secs_from_row(r, spec.interval_secs),
         }
         old = overrides.get(spec.key) or {}
         has_old = "atr_stop_mult" in old or "atr_trail_mult" in old
@@ -110,6 +129,7 @@ def apply_with_stability_gate() -> dict:
                 and abs(float(old.get("atr_trail_mult", new["atr_trail_mult"])) - new["atr_trail_mult"]) <= 0.5
                 and _tp_same_bucket(float(old.get("take_profit_pct", new["take_profit_pct"])),
                                     new["take_profit_pct"])
+                and int(old.get("check_in_secs") or spec.interval_secs) == new["check_in_secs"]
             )
         )
         if stable:
@@ -137,6 +157,11 @@ def apply_with_stability_gate() -> dict:
     }
     log.info("Walk-forward apply: %d applied, %d held (unstable), %d skipped",
              len(applied), len(held), len(skipped))
+    try:
+        import fleet_advisory
+        fleet_advisory.rebuild_advisories()
+    except Exception:
+        log.warning("fleet advisory rebuild failed", exc_info=True)
     return report
 
 

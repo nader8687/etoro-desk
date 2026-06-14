@@ -198,6 +198,12 @@ def card_caption(
     bid = (bot_id or "").strip()
     if not bid:
         return None
+    # Fast path: only flagged bots need a journal scan.  On a 100+ bot fleet this
+    # was scanning the full trade journal once per card per Bots-tab refresh.
+    with _lock:
+        flagged = bid in _bleeding
+    if not flagged:
+        return None
     stats = bot_stats(
         bid, strategy=strategy, interval=interval, instrument_id=instrument_id,
     )

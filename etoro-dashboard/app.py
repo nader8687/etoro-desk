@@ -18,10 +18,12 @@ log_buffer.install(logging.INFO)   # capture all module logs into the Logs tab
 from etoro_client import EToroClient, get_shared_client
 import engine_notify
 import bot_ranking
+import fleet_advisory
 import bot_registry
 import market_data_hub
 import positions_cache
 import prompt_preview
+import risk_manager
 import runtime_persist
 import instrument_config
 import position_sizer
@@ -906,7 +908,12 @@ def _render_signal_record(rec: dict) -> None:
         elif exec_status == "not_applicable":
             st.info(exec_reason or "No order — signal was HOLD.")
         elif decision in ("BUY", "SELL", "CLOSE"):
-            st.caption("Execution outcome not recorded yet (signal may pre-date this feature).")
+            st.caption(
+                "No execution outcome recorded — usually means auto-trade was off, "
+                "the bot engine was stopped, or the outcome was lost before persistence "
+                "(rebuild without saving). Turn the bot **ON** on the Bots tab and use "
+                "**Start Trading** in the sidebar to open positions on signals."
+            )
         # Bot provenance
         raw_uuid = rec.get("bot_id", "")
         if raw_uuid:
@@ -1619,10 +1626,7 @@ def _active_bot_uuid() -> str:
     active_key = _active_bot_key()
     if not active_key:
         return ""
-    snap = trading_engine.get_snapshot(bot_id=active_key)
-    if snap and snap.bot_uuid:
-        return snap.bot_uuid
-    return bot_registry.get(active_key) or ""
+    return trading_engine.get_bot_uuid(active_key)
 
 
 def _active_bot_open_trade(instrument_id: int):
@@ -1655,6 +1659,11 @@ def positions_owned_by_active_bot(
 
     trade = _active_bot_open_trade(instrument_id)
     if trade is None:
+        # Persisted owner without in-memory trade yet (restart / OFF bot).
+        bot_uuid = _active_bot_uuid()
+        pid = trade_manager.owned_position_id(bot_uuid) if bot_uuid else None
+        if pid is not None:
+            return [p for p in inst if str(p.get("position_id")) == str(pid)]
         return []
 
     pid = trade.etoro_position_id
@@ -1745,8 +1754,12 @@ def render_position_card(
     bot_tag_html = ""
     if iid:
         owned_trade = trade_manager.find_open_by_position_id(p.get("position_id"))
-        if owned_trade and owned_trade.bot_id:
-            trade_uuid = owned_trade.bot_id   # now a UUID string
+        trade_uuid = (
+            owned_trade.bot_id
+            if owned_trade and owned_trade.bot_id
+            else trade_manager.owner_of_position(p.get("position_id"))
+        )
+        if trade_uuid:
             snap_by_uuid = trading_engine.get_snapshot_by_uuid(trade_uuid)
             if snap_by_uuid:
                 interval_short = snap_by_uuid.interval_label.replace(" Minutes", "m").replace(" Minute", "m")
@@ -1757,7 +1770,17 @@ def render_position_card(
                 )
                 bot_desc = f"{trade_uuid[:8]} · {snap_by_uuid.bot_id} · {interval_short} · {strat_label}"
             else:
-                bot_desc = trade_uuid[:8]
+                _uuid_to_key = {v: k for k, v in bot_registry.get_all().items()}
+                _owner_key = _uuid_to_key.get(trade_uuid)
+                if _owner_key:
+                    eng_cfg = trading_engine.get_config(bot_id=_owner_key)
+                    strat_label = (
+                        strategies.display_names().get(eng_cfg.strategy_name, eng_cfg.strategy_name.upper())
+                        if eng_cfg else "—"
+                    )
+                    bot_desc = f"{trade_uuid[:8]} · {_owner_key} · {strat_label}"
+                else:
+                    bot_desc = trade_uuid[:8]
             bot_tag_html = (
                 f'<span style="margin-left:8px;padding:1px 6px;border-radius:4px;'
                 f'background:{ui.C_ACCENT}22;color:{ui.C_ACCENT};'
@@ -2470,12 +2493,27 @@ def _boot_background_engines() -> None:
     # only start for bots that are actually ON — avoids dozens of idle tick loops.
     _boot_at = bool(runtime_persist.load().get("auto_trade_active", False))
     trading_engine.restore_auto_trade(_boot_at)
-    st.session_state["auto_trade_active"] = _boot_at
+    _at_on = trading_engine.auto_trade_count()
+    st.session_state["auto_trade_active"] = _boot_at or _at_on > 0
     runtime_persist.save(dict(st.session_state))
     _boot_log.info(
         "Boot: global auto-trade=%s, %d engine thread(s), %d bot(s) with auto-trade ON",
         _boot_at, trading_engine.active_engine_count(), trading_engine.auto_trade_count(),
     )
+    try:
+        relinked = trading_engine.relink_owned_positions()
+        if relinked:
+            _boot_log.info("Boot: re-linked %d bot position(s) from persisted owners", relinked)
+    except Exception:
+        _boot_log.warning("Boot: position re-link failed", exc_info=True)
+    try:
+        positions_cache.start_background_poller(client, is_demo)
+    except Exception:
+        _boot_log.warning("Boot: positions poller failed to start", exc_info=True)
+    try:
+        fleet_advisory.rebuild_advisories()
+    except Exception:
+        _boot_log.warning("Boot: fleet advisory rebuild failed", exc_info=True)
 
 _boot_background_engines()
 
@@ -3350,11 +3388,11 @@ def _render_recent_signals(
 #   LIVE_REFRESH_SEC    → live chart + quote + side panels (Plotly render)
 #   PORTFOLIO_REFRESH_SEC → eToro portfolio table (reads positions cache)
 #   SIGNALS_REFRESH_SEC   → signal log feed (reads in-memory cache)
-LIVE_REFRESH_SEC      = 4
+LIVE_REFRESH_SEC      = 8
 QUOTE_REFRESH_SEC     = LIVE_REFRESH_SEC
 CHART_REFRESH_SEC     = LIVE_REFRESH_SEC
-PORTFOLIO_REFRESH_SEC = 10
-SIGNALS_REFRESH_SEC   = 10
+PORTFOLIO_REFRESH_SEC = 15
+SIGNALS_REFRESH_SEC   = 15
 
 
 def _live_trading_active() -> bool:
@@ -3834,7 +3872,8 @@ def history_tab_fragment(
     render_unified_history(shown, [], is_demo=is_demo, period_lbl=period_lbl)
 
 
-BOTS_REFRESH_SEC = 15
+BOTS_REFRESH_SEC = 30
+BOTS_PAGE_SIZE = 25
 
 
 def _on_bot_toggle(bot_key: str, iid: int, current_at: bool) -> None:
@@ -3868,6 +3907,35 @@ def _on_bot_toggle(bot_key: str, iid: int, current_at: bool) -> None:
                     user_key=user_key,
                     is_demo=st.session_state.get("is_demo", True),
                 )
+
+
+def _on_bot_delete_request(bot_key: str) -> None:
+    """First step — show delete confirmation (warns about position close)."""
+    st.session_state["_bot_delete_pending"] = bot_key
+
+
+def _on_bot_delete_cancel() -> None:
+    st.session_state.pop("_bot_delete_pending", None)
+
+
+def _on_bot_delete_confirm(bot_key: str) -> None:
+    """Delete bot after confirmation; closes any open demo position."""
+    is_demo = st.session_state.get("is_demo", True)
+    positions = positions_cache.get_positions()
+    ok, reason = trading_engine.delete_bot(
+        bot_key,
+        close_position=True,
+        client=get_shared_client(api_key, user_key),
+        is_demo=is_demo,
+        positions=positions,
+    )
+    st.session_state.pop("_bot_delete_pending", None)
+    if ok:
+        st.session_state["_bot_delete_msg"] = f"Bot `{bot_key}` deleted."
+        st.session_state["_bot_delete_ok"] = True
+    else:
+        st.session_state["_bot_delete_msg"] = reason
+        st.session_state["_bot_delete_ok"] = False
 
 
 def _on_bots_bulk_toggle(bot_pairs: list[tuple[str, int]], turn_on: bool) -> None:
@@ -3914,6 +3982,168 @@ def _on_bots_bulk_toggle(bot_pairs: list[tuple[str, int]], turn_on: bool) -> Non
     threading.Thread(target=_apply_bulk, daemon=True, name="bulk-bot-toggle").start()
 
 
+def _on_fleet_create_top() -> None:
+    """Create the top-N fleet-ranked bots in instruments.toml (auto-trade OFF)."""
+    import fleet_picker
+
+    n = int(st.session_state.get("bots_fleet_top_n", 35))
+    apply_exits = bool(st.session_state.get("bots_fleet_apply_exits", True))
+    asset_filter = st.session_state.get("bots_fleet_assets") or None
+
+    pick = fleet_picker.pick_top_bots(
+        n,
+        min_oos_n=8,
+        min_oos_pf=1.0,
+        create_missing=True,
+        assets=asset_filter,
+    )
+    if not pick.picked:
+        st.session_state["_fleet_top_msg"] = pick.message
+        st.session_state.pop("_fleet_top_detail", None)
+        return
+
+    fleet_picker.create_from_pick(pick, apply_exit_params=apply_exits)
+
+    preview = ", ".join(pick.picked[:8])
+    if len(pick.picked) > 8:
+        preview += f", … (+{len(pick.picked) - 8} more)"
+    detail = f"Bots: `{preview}` — turn on individually or use bulk ON when ready."
+    if pick.created:
+        created_preview = ", ".join(pick.created[:6])
+        if len(pick.created) > 6:
+            created_preview += f", … (+{len(pick.created) - 6} more)"
+        detail = f"New: `{created_preview}` · " + detail
+    st.session_state["_fleet_top_msg"] = pick.message
+    st.session_state["_fleet_top_detail"] = detail
+
+
+def _on_fleet_reset_all() -> None:
+    """Wipe instruments.toml bots and purge all running engines (background)."""
+    global _ENGINES_BOOTED
+
+    confirm = (st.session_state.get("bots_fleet_reset_confirm") or "").strip().upper()
+    if confirm != "DELETE ALL":
+        st.session_state["_fleet_reset_msg"] = "Type **DELETE ALL** in the box to confirm."
+        st.session_state["_fleet_reset_ok"] = False
+        return
+
+    import fleet_picker
+
+    is_demo = st.session_state.get("is_demo", True)
+    if not is_demo:
+        st.session_state["_fleet_reset_msg"] = (
+            "Cannot reset on a live account via API. Close positions in eToro first "
+            "or switch to Demo."
+        )
+        st.session_state["_fleet_reset_ok"] = False
+        return
+
+    removed, purged = fleet_picker.reset_all_bots_fast()
+    started, msg = fleet_picker.start_reset_in_background(
+        api_key=api_key,
+        user_key=user_key,
+        is_demo=is_demo,
+    )
+    _ENGINES_BOOTED = False
+    st.session_state["bots_fleet_reset_confirm"] = ""
+    st.session_state["_fleet_reset_msg"] = (
+        f"Removed {removed} bot(s) and stopped {purged} engine(s). {msg}"
+        if started else msg
+    )
+    st.session_state["_fleet_reset_ok"] = started
+
+
+def _render_bots_fleet_panel() -> None:
+    """Fleet pick / reset controls — always visible, even with zero bots configured."""
+    import fleet_picker as _fleet_picker
+
+    with st.expander("Create top bots from fleet optimization", expanded=False):
+        st.caption(
+            "Ranks the saved fleet run by **OOS expectancy** (OOS P&L ÷ OOS n), "
+            "requires OOS n≥8 & OOS PF≥1. Assets are the hardcoded diversification "
+            "set (Bitcoin, XRP, Tesla, NVIDIA, Gold, …). Creates bots in "
+            "**instruments.toml** with **auto-trade OFF**. Re-run fleet optimization "
+            "on Strategies if an asset is missing from the saved run."
+        )
+        _asset_opts = _fleet_picker.fleet_asset_options()
+        _in_fleet = _fleet_picker.assets_in_saved_fleet()
+        _default_assets = [a for a in _asset_opts if a in _in_fleet] or _asset_opts
+        st.multiselect(
+            "Assets to include",
+            options=_asset_opts,
+            default=_default_assets,
+            key="bots_fleet_assets",
+            help="Only top-N bots for these assets are created. "
+                 "Names match the fleet table (e.g. Bitcoin, Tesla, NVIDIA). "
+                 "Run fleet optimization with the same assets on Strategies first.",
+        )
+        fk1, fk2, fk3 = st.columns([1, 1, 1.4])
+        with fk1:
+            st.number_input(
+                "Number of bots", min_value=1, max_value=200, value=35, step=1,
+                key="bots_fleet_top_n",
+            )
+        with fk2:
+            st.checkbox(
+                "Apply fleet exit params", value=True, key="bots_fleet_apply_exits",
+                help="Write stability-gated stop/trail/TP/check-in from fleet_opt.json.",
+            )
+        with fk3:
+            st.button(
+                "Create top N from fleet",
+                key="bots_fleet_top_btn",
+                type="primary",
+                use_container_width=True,
+                on_click=_on_fleet_create_top,
+            )
+        _fleet_msg = st.session_state.pop("_fleet_top_msg", None)
+        if _fleet_msg:
+            st.success(_fleet_msg)
+        _fleet_detail = st.session_state.get("_fleet_top_detail")
+        if _fleet_detail:
+            st.caption(_fleet_detail)
+
+    with st.expander("Start fresh — delete all bots", expanded=False):
+        st.warning(
+            "Removes **every** bot from `instruments.toml`, stops all engines, "
+            "clears per-bot exit overrides and bot UUIDs, and **closes all open "
+            "demo positions at market on eToro**. This cannot be undone. "
+            "Live accounts: close positions in eToro first (API reset is demo-only). "
+            "Bot list is stored on the **data volume** and survives rebuilds after this."
+        )
+        st.text_input(
+            'Type "DELETE ALL" to confirm',
+            key="bots_fleet_reset_confirm",
+            placeholder="DELETE ALL",
+        )
+        st.button(
+            "Delete all bots & start fresh",
+            key="bots_fleet_reset_btn",
+            type="secondary",
+            use_container_width=True,
+            disabled=_fleet_picker.reset_in_progress(),
+            on_click=_on_fleet_reset_all,
+        )
+        _reset_status = _fleet_picker.get_reset_status()
+        if _reset_status.get("running"):
+            st.info(_reset_status.get("message") or "Deleting all bots…")
+        _reset_msg = st.session_state.pop("_fleet_reset_msg", None)
+        if _reset_msg:
+            if st.session_state.pop("_fleet_reset_ok", False):
+                st.success(_reset_msg)
+            else:
+                st.error(_reset_msg)
+        elif (
+            not _reset_status.get("running")
+            and _reset_status.get("message")
+            and _reset_status.get("ok") is not None
+        ):
+            if _reset_status.get("ok"):
+                st.success(_reset_status["message"])
+            else:
+                st.error(_reset_status["message"])
+
+
 @st.fragment(run_every=BOTS_REFRESH_SEC)
 def bots_live_fragment() -> None:
     """Auto-refreshing overview of all running bots (one card per instruments.toml entry)."""
@@ -3921,14 +4151,35 @@ def bots_live_fragment() -> None:
         return
 
     specs = instrument_config.load_specs()
+    _render_bots_fleet_panel()
+
     # get_all_snapshots now returns dict[str, ...] keyed by bot_id (spec.key)
     all_snaps = trading_engine.get_all_snapshots()
     all_hub   = market_data_hub.get_all_snapshots()
 
+    # Self-heal: re-adopt any persisted owner that lost its in-memory trade
+    # (restart, missed boot relink, or engine idle while auto-trade was OFF).
+    # Throttled — relink is idempotent but not free on a 100+ bot fleet.
+    _pf_positions = positions_cache.get_positions()
+    import fleet_picker as _fleet_picker
+    _relink_due = (
+        specs
+        and not _fleet_picker.reset_in_progress()
+        and trade_manager.count_bots_needing_relink(_pf_positions)
+        and (time.time() - st.session_state.get("_bots_last_relink", 0)) >= 60.0
+    )
+    if _relink_due:
+        try:
+            trading_engine.relink_owned_positions(positions=_pf_positions or None)
+            st.session_state["_bots_last_relink"] = time.time()
+        except Exception:
+            logging.getLogger("app.bots").warning("Bots-tab position relink failed", exc_info=True)
+        _pf_positions = positions_cache.get_positions()
+
     if not specs:
         st.info(
-            "No instruments configured. "
-            "Add entries to `instruments.toml` and rebuild the container."
+            "No bots configured. Use **Create your own bot** or **Create top N from fleet** "
+            "above, or add entries to `instruments.toml` manually."
         )
         return
 
@@ -3954,7 +4205,7 @@ def bots_live_fragment() -> None:
         key=lambda b: _freq_order.index(b) if b in _freq_order else 99,
     )
 
-    fc1, fc2, fc3, fc4 = st.columns(4)
+    fc1, fc2, fc3, fc4, fc5, fc6 = st.columns(6)
     with fc1:
         _strat_filter = st.selectbox(
             "Filter by strategy",
@@ -3984,10 +4235,48 @@ def bots_live_fragment() -> None:
                                    "off": "⭕ Off"}[k],
             key="bots_filter_state",
         )
+    with fc5:
+        _pos_filter = st.selectbox(
+            "Filter by position",
+            options=["__all__", "open", "flat"],
+            format_func=lambda k: {
+                "__all__": "All positions",
+                "open": "📦 Has open position",
+                "flat": "— Flat (no position)",
+            }[k],
+            key="bots_filter_position",
+        )
+    with fc6:
+        _present_origins = sorted(
+            {(s.created_via or "__legacy__") for s in resolved},
+            key=lambda k: (k == "__legacy__", k),
+        )
+        _origin_filter = st.selectbox(
+            "Filter by origin",
+            options=["__all__"] + _present_origins,
+            format_func=lambda k: (
+                "All origins" if k == "__all__"
+                else instrument_config.created_via_badge(
+                    "" if k == "__legacy__" else k
+                )
+            ),
+            key="bots_filter_origin",
+        )
 
     def _bot_is_on(key: str) -> bool:
         snap = all_snaps.get(key)
         return bool(snap and snap.trading_active)
+
+    def _bot_has_open_position(bot_key: str) -> bool:
+        bot_uuid = trading_engine.get_bot_uuid(bot_key)
+        if bot_uuid and trade_manager.get_open(bot_uuid):
+            return True
+        pid = trade_manager.owned_position_id(bot_uuid) if bot_uuid else None
+        if pid is None:
+            return False
+        return any(
+            str(p.get("position_id")) == str(pid) for p in _pf_positions
+        )
 
     visible = [
         s for s in resolved
@@ -3995,6 +4284,11 @@ def bots_live_fragment() -> None:
         and (_stock_filter == "__all__" or s.label == _stock_filter)
         and (_freq_filter == "__all__" or _freq_bucket(s.interval_secs) == _freq_filter)
         and (_state_filter == "__all__" or _bot_is_on(s.key) == (_state_filter == "on"))
+        and (_pos_filter == "__all__" or _bot_has_open_position(s.key) == (_pos_filter == "open"))
+        and (
+            _origin_filter == "__all__"
+            or (s.created_via or "__legacy__") == _origin_filter
+        )
     ]
     _visible_pairs = [(s.key, s.instrument_id) for s in visible]
 
@@ -4018,23 +4312,47 @@ def bots_live_fragment() -> None:
 
     if not visible:
         st.info("No bots match the current filter.")
-        return
+    else:
+        _total_pages = max(1, (len(visible) + BOTS_PAGE_SIZE - 1) // BOTS_PAGE_SIZE)
+        _page = int(st.session_state.get("bots_page", 0))
+        _page = max(0, min(_page, _total_pages - 1))
+        st.session_state["bots_page"] = _page
+        if _total_pages > 1:
+            pg1, pg2, pg3 = st.columns([1, 2, 1], vertical_alignment="center")
+            with pg1:
+                if st.button(
+                    "← Prev", key="bots_page_prev", disabled=_page <= 0,
+                    use_container_width=True,
+                ):
+                    st.session_state["bots_page"] = _page - 1
+                    st.rerun()
+            with pg2:
+                st.caption(
+                    f"Page **{_page + 1} / {_total_pages}** "
+                    f"({BOTS_PAGE_SIZE} bots per page — reduces UI lag on large fleets)"
+                )
+            with pg3:
+                if st.button(
+                    "Next →", key="bots_page_next", disabled=_page >= _total_pages - 1,
+                    use_container_width=True,
+                ):
+                    st.session_state["bots_page"] = _page + 1
+                    st.rerun()
+        _visible_page = visible[_page * BOTS_PAGE_SIZE : (_page + 1) * BOTS_PAGE_SIZE]
 
     # Group bots by instrument label for visual separation
     seen_labels: set[str] = set()
 
     # ── Per-bot rows ──────────────────────────────────────────────────────────
-    for spec in visible:
+    for spec in (_visible_page if visible else []):
         iid      = spec.instrument_id
         bot_key  = spec.key                    # unique toml section key e.g. "btc_15m"
         interval = spec.interval
 
         snap      = all_snaps.get(bot_key)
         chart     = all_hub.get(bot_key)
-        # Stable UUID for this bot — used for signal filtering and trade ownership.
-        # OFF bots have no live snapshot, so fall back to the persistent registry
-        # rather than dropping the UUID (which would break position attribution).
-        bot_uuid  = (snap.bot_uuid if snap else None) or bot_registry.get(bot_key) or ""
+        # Stable UUID — must match engine state and position_owners.json.
+        bot_uuid  = trading_engine.get_bot_uuid(bot_key)
 
         # Show a divider / header when we first encounter a new instrument label
         if spec.label not in seen_labels:
@@ -4087,11 +4405,30 @@ def bots_live_fragment() -> None:
                 f"{pnl_color} {pnl_pct:+.2f}%"
             )
         else:
-            pos_text = "—"
+            # Fallback: show persisted owner + live eToro row while memory catches up.
+            _owned_pid = trade_manager.owned_position_id(bot_uuid) if bot_uuid else None
+            _owned_pos = next(
+                (p for p in _pf_positions if str(p.get("position_id")) == str(_owned_pid)),
+                None,
+            ) if _owned_pid else None
+            if _owned_pos:
+                _dir = _owned_pos.get("direction") or (
+                    "LONG" if _owned_pos.get("is_buy") else "SHORT"
+                )
+                _entry = float(_owned_pos.get("open_rate") or 0)
+                pos_text = f"{_dir} @ {_entry:.4f} · linked (syncing)"
+            else:
+                pos_text = "—"
 
         # Last strategy signal for THIS bot (keyed by its UUID)
         sig  = signal_worker.get_result(iid, interval, bot_uuid)
-        esig = signal_worker.get_exit_result(iid, interval, bot_uuid)
+        _ci_secs = instrument_config.effective_check_in_secs(
+            bot_key, spec.interval_secs, toml_check_in=spec.check_in_secs or 0,
+        )
+        _ci_lbl = instrument_config.interval_label_for_secs(_ci_secs)
+        esig = signal_worker.get_exit_result(iid, _ci_lbl, bot_uuid)
+        if not esig and _ci_lbl != interval:
+            esig = signal_worker.get_exit_result(iid, interval, bot_uuid)
         if esig and esig.get("_status") == "done" and "_error" not in esig:
             last_sig = f"EXIT · {esig.get('action','?')} {esig.get('confidence','?')}%"
         elif sig and sig.get("_status") == "done" and "_error" not in sig:
@@ -4114,14 +4451,10 @@ def bots_live_fragment() -> None:
             with info_col:
                 n1, n2, n3 = st.columns([3, 2, 3])
                 with n1:
-                    st.markdown(f"**{interval}** bot")
+                    _origin_badge = instrument_config.created_via_badge(spec.created_via)
+                    st.markdown(f"**{interval}** bot · {_origin_badge}")
                     # Trade interval (entries, at candle close) vs exit check-in
                     # interval (how often the signal-reversal exit is re-checked).
-                    # Default check-in == trade interval = today's behaviour.
-                    _ci_secs = instrument_config.effective_check_in_secs(
-                        bot_key, spec.interval_secs,
-                    )
-                    _ci_lbl = instrument_config.interval_label_for_secs(_ci_secs)
                     _ci_same = _ci_secs >= spec.interval_secs
                     st.caption(
                         f"⏱ trade: **{interval}** · check-in: "
@@ -4139,6 +4472,9 @@ def bots_live_fragment() -> None:
                     )
                     if _bleed_cap:
                         st.caption(_bleed_cap)
+                    _fleet_cap = fleet_advisory.card_caption(bot_key)
+                    if _fleet_cap:
+                        st.caption(_fleet_cap)
                 with n2:
                     st.caption("Feed")
                     st.markdown(feed_badge)
@@ -4209,32 +4545,125 @@ def bots_live_fragment() -> None:
                     st.session_state["main_nav"] = "Trading"
                     st.rerun()
 
-                # Delete — only allowed when auto-trade is OFF and no owned position
-                _has_owned_pos = bool(
-                    bot_uuid and trade_manager.get_open(bot_uuid) is not None
-                )
-                _can_delete = not current_at and not _has_owned_pos
-                _delete_help = (
-                    "Disable auto-trade first." if current_at
-                    else "Close the open position first." if _has_owned_pos
-                    else "Permanently stop and remove this bot."
-                )
-                if st.button(
-                    "Delete", key=f"bot_del_{bot_key}",
-                    use_container_width=True,
-                    type="secondary",
-                    disabled=not _can_delete,
-                    help=_delete_help,
-                ):
-                    ok, reason = trading_engine.delete_bot(bot_key)
-                    if ok:
-                        st.success(f"Bot `{bot_key}` deleted.")
+                # Delete — two-step confirm; closes any open demo position
+                _has_owned_pos = _bot_has_open_position(bot_key)
+                _pending_del = st.session_state.get("_bot_delete_pending") == bot_key
+                if _pending_del:
+                    _warn = (
+                        "This will permanently delete the bot"
+                        + (" and **close its open position at market on eToro**" if _has_owned_pos else "")
+                        + ". Auto-trade will be turned off first. Confirm to proceed."
+                    )
+                    if not st.session_state.get("is_demo", True) and _has_owned_pos:
+                        st.error(
+                            "This bot has an open position. Close it in eToro first "
+                            "(live close via API is not supported)."
+                        )
+                        if st.button(
+                            "Cancel", key=f"bot_del_cancel_{bot_key}",
+                            use_container_width=True,
+                            on_click=_on_bot_delete_cancel,
+                        ):
+                            pass
                     else:
-                        st.error(reason)
-                    st.rerun()
+                        st.warning(_warn)
+                        _dc1, _dc2 = st.columns(2)
+                        with _dc1:
+                            st.button(
+                                "Confirm delete",
+                                key=f"bot_del_confirm_{bot_key}",
+                                use_container_width=True,
+                                type="primary",
+                                on_click=_on_bot_delete_confirm,
+                                args=(bot_key,),
+                            )
+                        with _dc2:
+                            st.button(
+                                "Cancel",
+                                key=f"bot_del_cancel_{bot_key}",
+                                use_container_width=True,
+                                on_click=_on_bot_delete_cancel,
+                            )
+                else:
+                    _delete_help = (
+                        "Permanently remove this bot. "
+                        "You will be asked to confirm; any open position will be closed."
+                    )
+                    st.button(
+                        "Delete",
+                        key=f"bot_del_{bot_key}",
+                        use_container_width=True,
+                        type="secondary",
+                        help=_delete_help,
+                        on_click=_on_bot_delete_request,
+                        args=(bot_key,),
+                    )
+
+    _bot_del_msg = st.session_state.pop("_bot_delete_msg", None)
+    if _bot_del_msg:
+        if st.session_state.pop("_bot_delete_ok", False):
+            st.success(_bot_del_msg)
+        else:
+            st.error(_bot_del_msg)
+
+    # ── Orphan bots: open positions but no longer in instruments.toml ─────────
+    _fleet_keys = {s.key for s in resolved}
+    _uuid_to_key = {v: k for k, v in bot_registry.get_all().items()}
+    _orphan_keys: list[str] = []
+    _seen_orphan: set[str] = set()
+    for p in _pf_positions:
+        uid = trade_manager.owner_of_position(p.get("position_id"))
+        if not uid:
+            continue
+        key = _uuid_to_key.get(uid)
+        if not key or key in _fleet_keys or key in _seen_orphan:
+            continue
+        _seen_orphan.add(key)
+        _orphan_keys.append(key)
+
+    if _orphan_keys and _pos_filter != "flat":
+        st.divider()
+        st.markdown("##### Open positions — bots not in fleet")
+        st.caption(
+            f"{len(_orphan_keys)} bot(s) still hold eToro positions but are not in "
+            "`instruments.toml`. Positions stay linked — re-add to the config or "
+            "close from **Portfolio**. Fleet optimization never auto-closes positions."
+        )
+        for bot_key in sorted(_orphan_keys):
+            bot_uuid = trading_engine.get_bot_uuid(bot_key)
+            open_trade = trade_manager.get_open(bot_uuid) if bot_uuid else None
+            _owned_pid = trade_manager.owned_position_id(bot_uuid) if bot_uuid else None
+            _owned_pos = next(
+                (p for p in _pf_positions if str(p.get("position_id")) == str(_owned_pid)),
+                None,
+            ) if _owned_pid else None
+            if open_trade is not None:
+                pos_text = (
+                    f"{open_trade.direction} @ {open_trade.entry_price:.4f} · "
+                    f"#{open_trade.etoro_position_id}"
+                )
+            elif _owned_pos:
+                _dir = _owned_pos.get("direction") or (
+                    "LONG" if _owned_pos.get("is_buy") else "SHORT"
+                )
+                pos_text = (
+                    f"{_dir} @ {float(_owned_pos.get('open_rate') or 0):.4f} · "
+                    f"#{_owned_pos.get('position_id')}"
+                )
+            else:
+                pos_text = "—"
+            with st.container(border=True):
+                c1, c2 = st.columns([5, 1], vertical_alignment="center")
+                with c1:
+                    st.markdown(f"**{bot_key}** · not in fleet")
+                    st.caption(f"id: `{bot_uuid[:8] if bot_uuid else '—'}` · position held on eToro")
+                    st.caption(f"**Position:** {pos_text}")
+                with c2:
+                    st.caption("Status")
+                    st.markdown("📦 orphan")
 
     # ── Session P&L summary (per instrument, not per bot) ─────────────────────
-            st.divider()
+    st.divider()
     st.caption("Session P&L (closed trades this run — per instrument)")
     # Deduplicate by iid so we don't show the same instrument twice
     seen_iids: dict[int, str] = {}
@@ -4874,7 +5303,7 @@ def _format_log_lines(records: list[dict]) -> str:
     )
 
 
-LOGS_REFRESH_SEC = 3.0
+LOGS_REFRESH_SEC = 5.0
 
 
 @st.fragment(run_every=LOGS_REFRESH_SEC)
@@ -5165,6 +5594,13 @@ with _nav_body.container():
     # ══════════════════════════════════════════════════════════════════════════════
 
     elif page == "Bots":
+        from views.create_bot import render_create_bot_section
+        render_create_bot_section(
+            all_instruments=globals().get("ALL_INSTRUMENTS") or {},
+            api_key=api_key,
+            user_key=user_key,
+            is_demo=st.session_state.get("is_demo", True),
+        )
         bots_live_fragment()
 
     elif page == "Portfolio":
